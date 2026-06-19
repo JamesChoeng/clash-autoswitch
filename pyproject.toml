@@ -33,3 +33,5 @@ clashpilot = "clashpilot.__main__:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["clashpilot"]
+# Ship the offline-fallback node list bundled inside the package.
+force-include = { "clashpilot/default_config.yaml" = "clashpilot/default_config.yaml" }

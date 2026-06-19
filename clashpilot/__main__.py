@@ -101,7 +101,10 @@ def _cmd_status(_args: argparse.Namespace) -> int:
     print(f"clashpilot {__version__}")
     print(f"  core running: {core.core_running()} (pid {core.core_pid()})")
     print(f"  core version: {core.core_version()}")
-    print(f"  subscription: {config.subscription_url() or '(none set)'}")
+    if config.using_default_subscription():
+        print(f"  subscription: (default) {config.DEFAULT_SUBSCRIPTION_URL}")
+    else:
+        print(f"  subscription: {config.subscription_url()}")
     print(f"  proxy:        127.0.0.1:{config.mixed_port()}")
     print(f"  controller:   127.0.0.1:{config.controller_port()}")
     print(f"  state dir:    {config.STATE_DIR}")

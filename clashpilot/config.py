@@ -53,6 +53,19 @@ DEFAULT_MIXED_PORT = 7890
 DEFAULT_CURSOR_PORT = 7897
 DEFAULT_CONTROLLER_PORT = 9090
 
+# Built-in default subscription so a fresh install connects out of the box, with
+# no `set-sub` step. A public, volunteer-run free node list that auto-updates and
+# ships proxy-groups + rules (so rule-mode routing and our node-switching work).
+# Free public nodes are unstable and see all your traffic -- override with your
+# own via `clashpilot set-sub <url>` for anything you care about.
+DEFAULT_SUBSCRIPTION_URL = (
+    "https://raw.githubusercontent.com/PuddinCat/BestClash/refs/heads/main/proxies.yaml"
+)
+
+# Last-resort offline fallback shipped inside the package: used only when neither
+# the user's subscription nor the default subscription URL can be fetched.
+BUNDLED_CONFIG_FILE = Path(__file__).with_name("default_config.yaml")
+
 
 class ConfigError(RuntimeError):
     """Raised on missing subscription / unfetchable subscription content."""
@@ -76,7 +89,18 @@ def save_settings(data: dict) -> None:
 
 
 def subscription_url() -> str | None:
+    """The user-configured subscription (env or saved settings), or None."""
     return os.getenv("CLASHPILOT_SUBSCRIPTION") or get_settings().get("subscription_url")
+
+
+def effective_subscription_url() -> str:
+    """URL we actually fetch: the user's if set, else the built-in default."""
+    return subscription_url() or DEFAULT_SUBSCRIPTION_URL
+
+
+def using_default_subscription() -> bool:
+    """True when no user subscription is set and we fall back to the default."""
+    return not subscription_url()
 
 
 def set_subscription_url(url: str) -> None:
@@ -124,10 +148,12 @@ def _opener() -> urllib.request.OpenerDirector:
 
 
 def fetch_subscription(url: str | None = None) -> str:
-    """Download the subscription body (decoding base64 panels) and cache it."""
-    url = url or subscription_url()
-    if not url:
-        raise ConfigError("no subscription URL set; run: clashpilot set-sub <url>")
+    """Download the subscription body (decoding base64 panels) and cache it.
+
+    Falls back to the built-in default subscription when the user hasn't set one,
+    so a fresh install can connect without a `set-sub` step.
+    """
+    url = url or effective_subscription_url()
     req = urllib.request.Request(url, headers={"User-Agent": "clash-verge/v2.0.0"})
     try:
         with _opener().open(req, timeout=30) as r:
@@ -174,14 +200,33 @@ def _strip_top_level_keys(yaml_text: str, keys: frozenset) -> str:
     return "\n".join(out)
 
 
+def _bundled_config_text() -> str | None:
+    """The packaged offline-fallback node list, or None if it's missing."""
+    try:
+        return BUNDLED_CONFIG_FILE.read_text(encoding="utf-8")
+    except OSError:
+        return None
+
+
 def build_managed_config(subscription_text: str | None = None) -> Path:
-    """Regenerate the managed config.yaml from the subscription + our overrides."""
+    """Regenerate the managed config.yaml from the subscription + our overrides.
+
+    Source precedence: explicit text > cached subscription > freshly fetched
+    subscription (user's, else the built-in default) > bundled offline fallback.
+    """
     text = subscription_text
     if text is None:
         if SUBSCRIPTION_FILE.exists():
             text = SUBSCRIPTION_FILE.read_text(encoding="utf-8")
         else:
-            text = fetch_subscription()
+            try:
+                text = fetch_subscription()
+            except ConfigError:
+                # Network unreachable on first run: fall back to bundled nodes so
+                # the core can still start and the user is online out of the box.
+                text = _bundled_config_text()
+                if text is None:
+                    raise
     base = _strip_top_level_keys(text, _OVERRIDE_KEYS).lstrip("\n")
     header = (
         "# Managed by clashpilot -- do not edit; regenerated from your subscription.\n"

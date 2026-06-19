@@ -30,11 +30,21 @@ Requires Python 3.8+ and git. The mihomo core is downloaded automatically on fir
 ## Quick start
 
 ```bash
-clashpilot set-sub "https://your-provider.example/sub?token=..."   # your Clash/Mihomo subscription
-clashpilot up                                                       # core + config + system proxy + autoswitch (blocks)
+clashpilot up   # core + config + system proxy + autoswitch (blocks)
 ```
 
-That's it — traffic now goes through the fastest live node, with automatic failover. Stop it with Ctrl-C (which also removes the system proxy and stops the core), or run it in the background:
+That's it — **online out of the box**. With no subscription set, clashpilot uses a built-in default (a public, auto-updating free node list) so you're connected the moment you install. Traffic goes through the fastest live node, with automatic failover.
+
+For your own (faster, more stable) nodes, point it at your subscription — it takes priority over the default:
+
+```bash
+clashpilot set-sub "https://your-provider.example/sub?token=..."   # your Clash/Mihomo subscription
+clashpilot update                                                   # rebuild config from it
+```
+
+> The built-in default uses free, volunteer-run public nodes — fine for getting online, but they're unstable and see all your traffic. Use your own subscription for anything sensitive.
+
+Stop it with Ctrl-C (which also removes the system proxy and stops the core), or run it in the background:
 
 ```bash
 clashpilot ensure   # start the whole stack in the background
@@ -94,7 +104,7 @@ Everything has sensible defaults. Override via environment variables:
 
 | Env var | Default | Meaning |
 |---|---|---|
-| `CLASHPILOT_SUBSCRIPTION` | from `set-sub` | subscription URL (overrides the saved one) |
+| `CLASHPILOT_SUBSCRIPTION` | built-in default | subscription URL (overrides `set-sub`; falls back to a built-in free default, then a bundled offline node list) |
 | `CLASHPILOT_GH_PROXY` | none | prefix for GitHub downloads, e.g. `https://ghproxy.com` (useful in CN) |
 | `CLASHPILOT_CORE_VERSION` | latest | pin a specific mihomo version (e.g. `v1.19.24`) |
 | `CLASHPILOT_MIXED_PORT` | `7890` | local HTTP+SOCKS proxy port |

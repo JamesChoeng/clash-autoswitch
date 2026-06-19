@@ -389,11 +389,10 @@ def format_scan(top_n: int = 10) -> str:
 
 
 def format_status() -> str:
-    sub = config.subscription_url()
     core_line = (
         f"core_running={core.core_running()}\n"
         f"core_version={core.core_version() or 'n/a'}\n"
-        f"subscription={'(set)' if sub else '(none)'}\n"
+        f"subscription={'(default)' if config.using_default_subscription() else '(set)'}\n"
         f"mixed_port={config.mixed_port()}\n"
     )
     try:
@@ -606,10 +605,9 @@ def bring_up() -> None:
     try:
         log("== standalone up: ensuring mihomo core")
         core.ensure_core()
-        if not config.subscription_url():
-            log("!! no subscription set -- run: clashpilot set-sub <url>")
-            print("no subscription set; run: clashpilot set-sub <url>")
-            return
+        if config.using_default_subscription():
+            log("== no user subscription set -- using built-in default "
+                "(set your own with: clashpilot set-sub <url>)")
         config.ensure_config()
         api.reconfigure()
         pid = core.start_core()
