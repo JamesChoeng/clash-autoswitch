@@ -52,6 +52,10 @@ SUBSCRIPTION_FILE = MANAGED_DIR / "subscription.yaml"
 DEFAULT_MIXED_PORT = 7890
 DEFAULT_CURSOR_PORT = 7897
 DEFAULT_CONTROLLER_PORT = 9090
+# mihomo logs every matched connection at info, which floods the core log. Default
+# to warning so the file stays small; override with CLASHPILOT_CORE_LOG_LEVEL.
+DEFAULT_CORE_LOG_LEVEL = "warning"
+_CORE_LOG_LEVELS = ("silent", "error", "warning", "info", "debug")
 
 # Built-in default subscription so a fresh install connects out of the box, with
 # no `set-sub` step. A public, volunteer-run free node list that auto-updates and
@@ -125,6 +129,16 @@ def mixed_port() -> int:
     return int(get_settings().get("mixed_port") or DEFAULT_MIXED_PORT)
 
 
+def core_log_level() -> str:
+    """mihomo log verbosity for the managed config (env/settings overridable)."""
+    lvl = (
+        os.getenv("CLASHPILOT_CORE_LOG_LEVEL")
+        or get_settings().get("core_log_level")
+        or DEFAULT_CORE_LOG_LEVEL
+    ).strip().lower()
+    return lvl if lvl in _CORE_LOG_LEVELS else DEFAULT_CORE_LOG_LEVEL
+
+
 def get_secret() -> str:
     """Stable controller secret, generated once and persisted in settings."""
     env = os.getenv("CLASH_SECRET")
@@ -181,7 +195,7 @@ def fetch_subscription(url: str | None = None) -> str:
 _OVERRIDE_KEYS = frozenset({
     "external-controller", "external-controller-tls", "secret", "external-ui",
     "mixed-port", "port", "socks-port", "redir-port", "tproxy-port",
-    "allow-lan", "bind-address", "mode",
+    "allow-lan", "bind-address", "mode", "log-level",
 })
 
 _TOP_KEY_RE = re.compile(r"^([A-Za-z0-9_.-]+):")
@@ -234,6 +248,7 @@ def build_managed_config(subscription_text: str | None = None) -> Path:
         "allow-lan: false\n"
         "bind-address: 127.0.0.1\n"
         "mode: rule\n"
+        f"log-level: {core_log_level()}\n"
         f"external-controller: 127.0.0.1:{controller_port()}\n"
         f'secret: "{get_secret()}"\n'
     )

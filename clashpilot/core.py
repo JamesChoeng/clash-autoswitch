@@ -45,6 +45,13 @@ CORE_PID_FILE = CORE_DIR / "mihomo.pid"
 CORE_VERSION_FILE = CORE_DIR / "version.txt"
 CORE_LOG_FILE = CORE_DIR / "mihomo.log"
 
+# Rotate the core log on (re)launch once it grows past this; mihomo holds the
+# handle while running, so a single .1 backup swapped at startup is enough.
+try:
+    CORE_LOG_MAX_BYTES = int(os.getenv("CLASHPILOT_CORE_LOG_MAX_BYTES") or "")
+except ValueError:
+    CORE_LOG_MAX_BYTES = 2_000_000
+
 
 class CoreError(RuntimeError):
     """Raised when the mihomo core can't be downloaded or launched."""
@@ -253,6 +260,11 @@ def start_core() -> int:
     binary = ensure_core()
     MANAGED_DIR.mkdir(parents=True, exist_ok=True)
     CORE_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        if CORE_LOG_MAX_BYTES > 0 and CORE_LOG_FILE.exists() and CORE_LOG_FILE.stat().st_size > CORE_LOG_MAX_BYTES:
+            CORE_LOG_FILE.replace(CORE_LOG_FILE.with_name(CORE_LOG_FILE.name + ".1"))
+    except OSError:
+        pass
     logf = open(CORE_LOG_FILE, "ab")
     kwargs: dict = {**_NO_WINDOW}
     if sys.platform != "win32":
