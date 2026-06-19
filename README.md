@@ -2,11 +2,31 @@
 
 简体中文 | [English](README.en.md)
 
-一个独立运行的 Clash/Mihomo 客户端：自动选择最快的代理节点，节点掉线时自动切换，全程在后台静默运行。无需 Clash Verge、无需图形界面，[mihomo](https://github.com/MetaCubeX/mihomo) 内核自动下载并管理。
+最适合 AI agent 使用的科学上网工具：自动选择最快的代理节点，节点掉线时自动切换，全程在后台静默运行。无需图形界面，开箱即用，让 Cursor 等 AI 工具始终保持稳定联网。
 
 自带一份免费默认节点，安装后即可联网；填入自己的订阅可获得更快、更稳定的连接。
 
 ## 安装
+
+### 一键安装（自动检测并安装 Python / git）
+
+无需事先准备环境：脚本会自动检测是否已有 Python 3.8+ 和 git，缺失时自动安装，随后通过 `pipx` 安装 clashpilot。
+
+Windows（PowerShell）：
+
+```powershell
+irm https://raw.githubusercontent.com/JamesChoeng/clashpilot/main/install.ps1 | iex
+```
+
+macOS / Linux：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/JamesChoeng/clashpilot/main/install.sh | sh
+```
+
+安装完成后，**新开一个终端**再运行 `clashpilot up`。
+
+### 已有 Python 环境
 
 需要 [Python 3.8+](https://www.python.org/downloads/) 和 [git](https://git-scm.com/downloads)。推荐使用 `pipx`：
 

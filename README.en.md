@@ -2,11 +2,31 @@
 
 [简体中文](README.md) | English
 
-A standalone Clash/Mihomo client that auto-selects the fastest proxy node, fails over when a node drops, and runs silently in the background. No Clash Verge, no GUI — the [mihomo](https://github.com/MetaCubeX/mihomo) core is downloaded and managed for you.
+The best proxy tool for AI agents: it auto-selects the fastest proxy node, fails over when a node drops, and runs silently in the background. No GUI, works out of the box — keeping Cursor and other AI tools reliably online.
 
 A free default node list is built in, so you're online right after install; add your own subscription for a faster, more stable connection.
 
 ## Install
+
+### One-line install (auto-detects & installs Python / git)
+
+No need to prepare the environment first: the script detects whether Python 3.8+ and git are present, installs them if missing, then installs clashpilot via `pipx`.
+
+Windows (PowerShell):
+
+```powershell
+irm https://raw.githubusercontent.com/JamesChoeng/clashpilot/main/install.ps1 | iex
+```
+
+macOS / Linux:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/JamesChoeng/clashpilot/main/install.sh | sh
+```
+
+Open a **new terminal** afterwards, then run `clashpilot up`.
+
+### If you already have Python
 
 Requires [Python 3.8+](https://www.python.org/downloads/) and [git](https://git-scm.com/downloads). `pipx` is recommended:
 
