@@ -1,0 +1,35 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "clash-autoswitch"
+version = "0.1.0"
+description = "Auto-pick the fastest Clash/Mihomo proxy node and fail over when it dies."
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "MIT" }
+authors = [{ name = "james" }]
+keywords = ["clash", "mihomo", "clash-verge", "proxy", "failover", "latency"]
+classifiers = [
+    "Environment :: Console",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Topic :: Internet :: Proxy Servers",
+]
+# Zero third-party dependencies: standard library only.
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/yourname/clash-autoswitch"
+Issues = "https://github.com/yourname/clash-autoswitch/issues"
+
+[project.scripts]
+clash-autoswitch = "clash_autoswitch.__main__:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["clash_autoswitch"]
