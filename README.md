@@ -1,5 +1,7 @@
 # clashpilot
 
+English | [简体中文](README.zh-CN.md)
+
 A **standalone** Clash/Mihomo client that auto-picks the **fastest** proxy node and **fails over** the instant the active one dies.
 
 Give it a subscription link and it does everything: downloads the [mihomo](https://github.com/MetaCubeX/mihomo) core for your platform, generates the config, launches the core, sets your system proxy, then continuously probes every node against your real targets (Cursor + Anthropic by default), switches to the fastest, and instantly hops to the next best one when the node you're on goes down.
