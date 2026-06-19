@@ -29,6 +29,8 @@ To update later: `pipx upgrade clashpilot` (or re-run the install command).
 
 Requires Python 3.8+ and git. The mihomo core is downloaded automatically on first run.
 
+> **PATH setup**: `pipx`/`uvx` put the commands on PATH for you. With `pip install --user`, the console scripts may land in a directory that isn't on PATH — the first `clashpilot up` / `clashpilot hook` automatically adds that directory to your user PATH (on Windows it also installs a PowerShell shim so `clp` shadows the built-in alias of the same name). You can also run `clashpilot setup-path` anytime. Open a **new terminal** afterwards to use `clashpilot` / `clp` directly.
+
 ## Quick start
 
 ```bash
@@ -77,6 +79,8 @@ Combine it with [auto-start at login](#auto-start-at-login) and your agents stay
 
 ## Usage
 
+> `clashpilot` too long to type? Installation also provides a short alias `clp`, fully equivalent to `clashpilot` — e.g. `clp up`, `clp status`.
+
 ```bash
 clashpilot set-sub URL # save your Clash/Mihomo subscription URL
 clashpilot up          # standalone: core + config + system proxy + loop (blocks)
@@ -89,6 +93,7 @@ clashpilot scan        # rank all nodes by latency (no switch)
 clashpilot switch HK   # manually switch to a node (name or substring)
 clashpilot log         # tail the daemon log
 clashpilot stop        # stop the background daemon (leaves core running)
+clashpilot setup-path  # add the clashpilot/clp scripts dir to your user PATH (idempotent)
 ```
 
 ## Auto-start at login

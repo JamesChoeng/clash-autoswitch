@@ -30,6 +30,8 @@ Issues = "https://github.com/JamesChoeng/clashpilot/issues"
 
 [project.scripts]
 clashpilot = "clashpilot.__main__:main"
+# Short alias: `clp up` == `clashpilot up`.
+clp = "clashpilot.__main__:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["clashpilot"]

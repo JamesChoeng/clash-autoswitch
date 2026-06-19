@@ -20,7 +20,7 @@ from pathlib import Path
 # Mirror so first-time / refresh downloads survive GitHub being blocked in CN.
 os.environ.setdefault("CLASHPILOT_GH_PROXY", "https://ghfast.top")
 
-from . import __version__, config, core, sysproxy
+from . import __version__, config, core, pathsetup, sysproxy
 
 _GEO_BASE = "https://ghfast.top/https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/"
 _GEO_FILES = ("geoip.metadb", "geosite.dat")
@@ -51,8 +51,24 @@ def _ensure_geo() -> None:
             _log(f"geo {fn} download failed: {e}")
 
 
+def _ensure_path_once() -> None:
+    """First-run only: put the console-scripts dir on PATH, then never auto-touch
+    it again (so a user who later removes it isn't fought on every bring-up)."""
+    try:
+        s = config.get_settings()
+        if s.get("path_setup_done"):
+            return
+        pathsetup.ensure_path_quiet()
+        s["path_setup_done"] = True
+        config.save_settings(s)
+        _log("path setup attempted on first run")
+    except Exception as e:  # noqa: BLE001
+        _log(f"path setup skipped: {e}")
+
+
 def bringup() -> tuple[int, bool]:
     """Ensure config, geo DBs, and core; start core; (re)assert system proxy."""
+    _ensure_path_once()
     config.ensure_config()
     _ensure_geo()
     core.ensure_core()
@@ -117,6 +133,19 @@ def _cmd_set_sub(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_setup_path(_args: argparse.Namespace) -> int:
+    for line in pathsetup.setup_path():
+        print(line)
+    # Don't auto-redo on the next bring-up: the user has configured it explicitly.
+    try:
+        s = config.get_settings()
+        s["path_setup_done"] = True
+        config.save_settings(s)
+    except Exception:  # noqa: BLE001
+        pass
+    return 0
+
+
 def _cmd_update(_args: argparse.Namespace) -> int:
     path = config.update_subscription()
     print(f"subscription refreshed; managed config rebuilt at {path}")
@@ -125,8 +154,16 @@ def _cmd_update(_args: argparse.Namespace) -> int:
     return 0
 
 
+def _prog_name() -> str:
+    """Reflect how the user invoked us (e.g. `clp`) in help/usage text."""
+    name = os.path.basename(sys.argv[0]) if sys.argv and sys.argv[0] else "clashpilot"
+    if name.endswith(".py") or name in ("__main__.py", "-c", ""):
+        return "clashpilot"
+    return name
+
+
 def _build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="clashpilot", description="Standalone Clash/Mihomo client.")
+    p = argparse.ArgumentParser(prog=_prog_name(), description="Standalone Clash/Mihomo client.")
     p.add_argument("--version", action="version", version=f"clashpilot {__version__}")
     sub = p.add_subparsers(dest="command", required=True)
 
@@ -140,6 +177,10 @@ def _build_parser() -> argparse.ArgumentParser:
     sp.set_defaults(func=_cmd_set_sub)
 
     sub.add_parser("update", help="Re-fetch the subscription and rebuild the config.").set_defaults(func=_cmd_update)
+    sub.add_parser(
+        "setup-path",
+        help="Add the clashpilot/clp scripts dir to your user PATH (idempotent).",
+    ).set_defaults(func=_cmd_setup_path)
     return p
 
 
