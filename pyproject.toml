@@ -9,7 +9,7 @@ description = "Auto-pick the fastest Clash/Mihomo proxy node and fail over when 
 readme = "README.md"
 requires-python = ">=3.8"
 license = { text = "MIT" }
-authors = [{ name = "james" }]
+authors = [{ name = "JamesChoeng", email = "jameschoeng@gmail.com" }]
 keywords = ["clash", "mihomo", "clash-verge", "proxy", "failover", "latency"]
 classifiers = [
     "Environment :: Console",
@@ -25,8 +25,8 @@ classifiers = [
 dependencies = []
 
 [project.urls]
-Homepage = "https://github.com/yourname/clash-autoswitch"
-Issues = "https://github.com/yourname/clash-autoswitch/issues"
+Homepage = "https://github.com/JamesChoeng/clash-autoswitch"
+Issues = "https://github.com/JamesChoeng/clash-autoswitch/issues"
 
 [project.scripts]
 clash-autoswitch = "clash_autoswitch.__main__:main"
