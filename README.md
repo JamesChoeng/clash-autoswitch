@@ -70,6 +70,18 @@ clashpilot update
 
 > 所有命令均可使用短命令 `clp` 代替 `clashpilot`，例如 `clp up`。
 
+## 后台常驻（开机自启）
+
+让 clashpilot 在登录时自动启动并常驻后台（崩溃自动重启）：
+
+```bash
+clashpilot install-service
+```
+
+撤销：`clashpilot uninstall-service`。
+
+> macOS 使用 launchd、Linux 使用 systemd --user、Windows 使用登录计划任务；安装后立即启动，无需注销重登。
+
 ## 让 Cursor 等 AI 工具保持在线
 
 将以下内容加入 `~/.cursor/hooks.json`，每次会话开始时自动确保代理就绪：
@@ -89,13 +101,15 @@ clashpilot update
 
 | 命令 | 说明 |
 |---|---|
-| `clashpilot up` | 启动：内核 + 系统代理 + 自动切换（前台运行） |
-| `clashpilot down` | 停止：关闭内核并撤销系统代理 |
-| `clashpilot status` | 查看内核、代理、订阅等状态 |
+| `clashpilot up` | 启动：内核 + 系统代理 + 自动切换（前台运行，`Ctrl-C` 停止） |
+| `clashpilot down` | 停止：关闭后台进程与内核并撤销系统代理 |
+| `clashpilot status` | 查看自动切换、内核、代理、订阅等状态 |
 | `clashpilot set-sub URL` | 保存订阅链接 |
 | `clashpilot update` | 重新拉取订阅并重建配置 |
+| `clashpilot install-service` | 注册开机自启的后台服务（崩溃自动重启） |
+| `clashpilot uninstall-service` | 移除开机自启的后台服务 |
 | `clashpilot setup-path` | 将命令所在目录加入 PATH |
-| `clashpilot hook` | 供 Cursor 钩子调用 |
+| `clashpilot hook` | 供 Cursor 钩子调用（确保后台守护进程在运行） |
 
 ## 配置
 

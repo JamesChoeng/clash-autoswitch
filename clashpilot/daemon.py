@@ -504,7 +504,13 @@ def start_daemon() -> str:
     kwargs: dict = {**_NO_WINDOW}
     if sys.platform != "win32":
         kwargs["start_new_session"] = True  # detach so it survives parent exit
-    subprocess.Popen([str(PYTHON), "-m", "clashpilot", "up"], **kwargs)
+    # Detach stdio: the loop logs to LOG_FILE, and inheriting the caller's
+    # stdout (e.g. the `hook` process) would corrupt its `{}` output.
+    subprocess.Popen(
+        [str(PYTHON), "-m", "clashpilot", "up"],
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        **kwargs,
+    )
     # Poll instead of a fixed sleep so we return as soon as the pid file lands.
     deadline = time.time() + 5
     while time.time() < deadline:

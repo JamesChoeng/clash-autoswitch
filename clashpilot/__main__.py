@@ -20,7 +20,7 @@ from pathlib import Path
 # Mirror so first-time / refresh downloads survive GitHub being blocked in CN.
 os.environ.setdefault("CLASHPILOT_GH_PROXY", "https://ghfast.top")
 
-from . import __version__, config, core, pathsetup, sysproxy
+from . import __version__, config, core, daemon, pathsetup, service, sysproxy
 
 _GEO_BASE = "https://ghfast.top/https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/"
 _GEO_FILES = ("geoip.metadb", "geosite.dat")
@@ -66,25 +66,24 @@ def _ensure_path_once() -> None:
         _log(f"path setup skipped: {e}")
 
 
-def bringup() -> tuple[int, bool]:
-    """Ensure config, geo DBs, and core; start core; (re)assert system proxy."""
+def _prepare() -> None:
+    """First-run prep shared by foreground/background bring-up: PATH, config,
+    geo DBs, and the mihomo core binary. All steps are idempotent / cached."""
     _ensure_path_once()
     config.ensure_config()
     _ensure_geo()
     core.ensure_core()
-    pid = core.start_core()
-    ok = sysproxy.set_system_proxy("127.0.0.1", config.mixed_port())
-    return pid, ok
 
 
 # --- Subcommands -------------------------------------------------------------
 
 
 def _cmd_hook(_args: argparse.Namespace) -> int:
-    """Cursor sessionStart entrypoint: best-effort, silent, prints `{}`."""
+    """Cursor sessionStart entrypoint: ensure a background daemon is running,
+    then print `{}` and return fast (downloads happen in the daemon)."""
     try:
-        pid, ok = bringup()
-        _log(f"up: pid={pid} proxy={ok}")
+        msg = daemon.start_daemon()
+        _log(f"hook: {msg}")
     except Exception as e:  # noqa: BLE001
         _log(f"error: {e}")
     try:
@@ -97,24 +96,35 @@ def _cmd_hook(_args: argparse.Namespace) -> int:
 
 
 def _cmd_up(_args: argparse.Namespace) -> int:
-    pid, ok = bringup()
-    print(f"clashpilot up: core pid={pid}, system proxy={'set' if ok else 'FAILED'}")
+    """Foreground: core + system proxy + autoswitch loop. Blocks until Ctrl-C."""
+    running = daemon.daemon_pid()
+    if running:
+        print(f"clashpilot already running (pid {running}); nothing to do.")
+        print("  stop it with: clashpilot down")
+        return 0
+    print("clashpilot: preparing (config, geo databases, core)...")
+    _prepare()
+    print("clashpilot up: core + system proxy + autoswitch (foreground, Ctrl-C to stop)")
     print(f"  proxy:      127.0.0.1:{config.mixed_port()} (http+socks)")
     print(f"  controller: 127.0.0.1:{config.controller_port()}")
     print(f"  core:       mihomo {core.core_version()}")
+    print(f"  logs:       {daemon.LOG_FILE}")
+    daemon.bring_up()  # blocks in the autoswitch loop; tears down on exit
     return 0
 
 
 def _cmd_down(_args: argparse.Namespace) -> int:
-    stopped = core.stop_core()
+    dmsg = daemon.stop_daemon()  # stop foreground/background loop if any
+    stopped = core.stop_core()   # ensure the core is down (idempotent)
     unset = sysproxy.unset_system_proxy()
-    print(f"clashpilot down: core {'stopped' if stopped else 'not running'}, "
+    print(f"clashpilot down: daemon {dmsg}; core {'stopped' if stopped else 'not running'}, "
           f"system proxy {'unset' if unset else 'unchanged'}")
     return 0
 
 
 def _cmd_status(_args: argparse.Namespace) -> int:
     print(f"clashpilot {__version__}")
+    print(f"  autoswitch:   {'running' if daemon.daemon_pid() else 'stopped'} (pid {daemon.daemon_pid()})")
     print(f"  core running: {core.core_running()} (pid {core.core_pid()})")
     print(f"  core version: {core.core_version()}")
     if config.using_default_subscription():
@@ -124,6 +134,16 @@ def _cmd_status(_args: argparse.Namespace) -> int:
     print(f"  proxy:        127.0.0.1:{config.mixed_port()}")
     print(f"  controller:   127.0.0.1:{config.controller_port()}")
     print(f"  state dir:    {config.STATE_DIR}")
+    return 0
+
+
+def _cmd_install_service(_args: argparse.Namespace) -> int:
+    print(service.install_service())
+    return 0
+
+
+def _cmd_uninstall_service(_args: argparse.Namespace) -> int:
+    print(service.uninstall_service())
     return 0
 
 
@@ -167,9 +187,9 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--version", action="version", version=f"clashpilot {__version__}")
     sub = p.add_subparsers(dest="command", required=True)
 
-    sub.add_parser("hook", help="Cursor sessionStart entrypoint (idempotent bring-up).").set_defaults(func=_cmd_hook)
-    sub.add_parser("up", help="Start core and set the system proxy (idempotent).").set_defaults(func=_cmd_up)
-    sub.add_parser("down", help="Stop core and unset the system proxy.").set_defaults(func=_cmd_down)
+    sub.add_parser("hook", help="Cursor sessionStart entrypoint: ensure the background daemon is running.").set_defaults(func=_cmd_hook)
+    sub.add_parser("up", help="Core + system proxy + autoswitch in the foreground (Ctrl-C to stop).").set_defaults(func=_cmd_up)
+    sub.add_parser("down", help="Stop the daemon/core and unset the system proxy.").set_defaults(func=_cmd_down)
     sub.add_parser("status", help="Show core / proxy / subscription status.").set_defaults(func=_cmd_status)
 
     sp = sub.add_parser("set-sub", help="Save your Clash/Mihomo subscription URL.")
@@ -181,6 +201,14 @@ def _build_parser() -> argparse.ArgumentParser:
         "setup-path",
         help="Add the clashpilot/clp scripts dir to your user PATH (idempotent).",
     ).set_defaults(func=_cmd_setup_path)
+    sub.add_parser(
+        "install-service",
+        help="Run clashpilot in the background at login (restarts on crash).",
+    ).set_defaults(func=_cmd_install_service)
+    sub.add_parser(
+        "uninstall-service",
+        help="Remove the login-launched background service.",
+    ).set_defaults(func=_cmd_uninstall_service)
     return p
 
 

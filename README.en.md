@@ -70,6 +70,18 @@ clashpilot update
 
 > Every command also works with the short alias `clp`, e.g. `clp up`.
 
+## Run in the background (start at login)
+
+Have clashpilot start at login and stay running in the background (restarts on crash):
+
+```bash
+clashpilot install-service
+```
+
+Remove it: `clashpilot uninstall-service`.
+
+> Uses launchd on macOS, a systemd --user unit on Linux, and a logon Scheduled Task on Windows; it starts immediately, no logout/login needed.
+
 ## Keep Cursor & other AI tools online
 
 Add this to `~/.cursor/hooks.json` to ensure the proxy is ready at the start of every session:
@@ -89,13 +101,15 @@ Add this to `~/.cursor/hooks.json` to ensure the proxy is ready at the start of 
 
 | Command | Description |
 |---|---|
-| `clashpilot up` | Start: core + system proxy + autoswitch (foreground) |
-| `clashpilot down` | Stop: shut down the core and undo the system proxy |
-| `clashpilot status` | Show core / proxy / subscription status |
+| `clashpilot up` | Start: core + system proxy + autoswitch (foreground, `Ctrl-C` to stop) |
+| `clashpilot down` | Stop: shut down the background daemon/core and undo the system proxy |
+| `clashpilot status` | Show autoswitch / core / proxy / subscription status |
 | `clashpilot set-sub URL` | Save your subscription link |
 | `clashpilot update` | Re-fetch the subscription and rebuild the config |
+| `clashpilot install-service` | Register a login-launched background service (restarts on crash) |
+| `clashpilot uninstall-service` | Remove the login-launched background service |
 | `clashpilot setup-path` | Add the command's directory to PATH |
-| `clashpilot hook` | For the Cursor hook |
+| `clashpilot hook` | For the Cursor hook (ensures the background daemon is running) |
 
 ## Configuration
 
