@@ -12,6 +12,7 @@ so it can't be relied on to reach GitHub).
 from __future__ import annotations
 
 import gzip
+import ctypes
 import json
 import os
 import platform
@@ -29,6 +30,7 @@ GITHUB_REPO = "MetaCubeX/mihomo"
 
 # On Windows, console helpers flash a window unless explicitly suppressed.
 _NO_WINDOW = {"creationflags": subprocess.CREATE_NO_WINDOW} if sys.platform == "win32" else {}
+_WIN_STILL_ACTIVE = 259
 
 CORE_PID_FILE = CORE_DIR / "mihomo.pid"
 CORE_VERSION_FILE = CORE_DIR / "version.txt"
@@ -177,16 +179,47 @@ def core_version() -> str | None:
 
 def _pid_alive(pid: int) -> bool:
     if sys.platform == "win32":
-        r = subprocess.run(
-            ["tasklist", "/FI", f"PID eq {pid}", "/NH"],
-            capture_output=True, text=True, timeout=10, **_NO_WINDOW,
-        )
-        return str(pid) in r.stdout
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+        kernel32.OpenProcess.argtypes = [ctypes.c_ulong, ctypes.c_bool, ctypes.c_ulong]
+        kernel32.OpenProcess.restype = ctypes.c_void_p
+        kernel32.GetExitCodeProcess.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_ulong)]
+        kernel32.GetExitCodeProcess.restype = ctypes.c_bool
+        kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+        kernel32.CloseHandle.restype = ctypes.c_bool
+        handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if not handle:
+            return False
+        try:
+            code = ctypes.c_ulong()
+            if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+                return False
+            return code.value == _WIN_STILL_ACTIVE
+        finally:
+            kernel32.CloseHandle(handle)
     try:
         os.kill(pid, 0)
         return True
     except OSError:
         return False
+
+
+def _win_terminate(pid: int) -> bool:
+    PROCESS_TERMINATE = 0x0001
+    kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+    kernel32.OpenProcess.argtypes = [ctypes.c_ulong, ctypes.c_bool, ctypes.c_ulong]
+    kernel32.OpenProcess.restype = ctypes.c_void_p
+    kernel32.TerminateProcess.argtypes = [ctypes.c_void_p, ctypes.c_uint]
+    kernel32.TerminateProcess.restype = ctypes.c_bool
+    kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+    kernel32.CloseHandle.restype = ctypes.c_bool
+    handle = kernel32.OpenProcess(PROCESS_TERMINATE, False, pid)
+    if not handle:
+        return False
+    try:
+        return bool(kernel32.TerminateProcess(handle, 1))
+    finally:
+        kernel32.CloseHandle(handle)
 
 
 def core_pid() -> int | None:
@@ -229,10 +262,7 @@ def stop_core() -> bool:
         CORE_PID_FILE.unlink(missing_ok=True)
         return False
     if sys.platform == "win32":
-        subprocess.run(
-            ["taskkill", "/PID", str(pid), "/T", "/F"],
-            capture_output=True, timeout=10, **_NO_WINDOW,
-        )
+        _win_terminate(pid)
     else:
         try:
             os.kill(pid, signal.SIGTERM)

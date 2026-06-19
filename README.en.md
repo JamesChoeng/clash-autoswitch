@@ -91,11 +91,13 @@ Add this to `~/.cursor/hooks.json` to ensure the proxy is ready at the start of 
   "version": 1,
   "hooks": {
     "sessionStart": [
-      { "command": "clashpilot hook" }
+      { "command": "clashpilotw hook" }
     ]
   }
 }
 ```
+
+> On Windows, prefer `clashpilotw hook`; it uses a windowless entry point. macOS / Linux can keep using `clashpilot hook`.
 
 ## Commands
 

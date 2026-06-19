@@ -18,6 +18,7 @@ directory, overridable with CLASHPILOT_STATE_DIR.
 from __future__ import annotations
 
 import concurrent.futures as cf
+import ctypes
 import json
 import os
 import signal
@@ -109,6 +110,7 @@ GROUP_TYPES = {
 # On Windows, console helpers (tasklist/taskkill) flash a window unless we
 # explicitly suppress it. Reuse the same flag for every subprocess we spawn.
 _NO_WINDOW = {"creationflags": subprocess.CREATE_NO_WINDOW} if sys.platform == "win32" else {}
+_WIN_STILL_ACTIVE = 259
 
 # Cross-call state for hysteresis / anti-flap. Module-level because pick_and_switch
 # is otherwise stateless and may be invoked once-off or from the daemon loop.
@@ -443,13 +445,6 @@ def tail_log(lines: int = 15) -> str:
 def _proc_cmdline(pid: int) -> str:
     """Best-effort command line of a pid, lowercased. Empty string if unknown."""
     try:
-        if sys.platform == "win32":
-            r = subprocess.run(
-                ["powershell", "-NoProfile", "-Command",
-                 f"(Get-CimInstance Win32_Process -Filter \"ProcessId={pid}\").CommandLine"],
-                capture_output=True, text=True, timeout=10, **_NO_WINDOW,
-            )
-            return (r.stdout or "").strip().lower()
         proc = Path(f"/proc/{pid}/cmdline")
         if proc.exists():
             return proc.read_bytes().replace(b"\x00", b" ").decode("utf-8", "replace").strip().lower()
@@ -462,13 +457,48 @@ def _proc_cmdline(pid: int) -> str:
         return ""
 
 
+def _win_pid_alive(pid: int) -> bool:
+    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+    kernel32.OpenProcess.argtypes = [ctypes.c_ulong, ctypes.c_bool, ctypes.c_ulong]
+    kernel32.OpenProcess.restype = ctypes.c_void_p
+    kernel32.GetExitCodeProcess.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_ulong)]
+    kernel32.GetExitCodeProcess.restype = ctypes.c_bool
+    kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+    kernel32.CloseHandle.restype = ctypes.c_bool
+    handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not handle:
+        return False
+    try:
+        code = ctypes.c_ulong()
+        if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+            return False
+        return code.value == _WIN_STILL_ACTIVE
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def _win_terminate(pid: int) -> bool:
+    PROCESS_TERMINATE = 0x0001
+    kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+    kernel32.OpenProcess.argtypes = [ctypes.c_ulong, ctypes.c_bool, ctypes.c_ulong]
+    kernel32.OpenProcess.restype = ctypes.c_void_p
+    kernel32.TerminateProcess.argtypes = [ctypes.c_void_p, ctypes.c_uint]
+    kernel32.TerminateProcess.restype = ctypes.c_bool
+    kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+    kernel32.CloseHandle.restype = ctypes.c_bool
+    handle = kernel32.OpenProcess(PROCESS_TERMINATE, False, pid)
+    if not handle:
+        return False
+    try:
+        return bool(kernel32.TerminateProcess(handle, 1))
+    finally:
+        kernel32.CloseHandle(handle)
+
+
 def _pid_alive(pid: int) -> bool:
     if sys.platform == "win32":
-        r = subprocess.run(
-            ["tasklist", "/FI", f"PID eq {pid}", "/NH"],
-            capture_output=True, text=True, timeout=10, **_NO_WINDOW,
-        )
-        return str(pid) in r.stdout
+        return _win_pid_alive(pid)
     try:
         os.kill(pid, 0)  # signal 0 = existence check, doesn't kill
         return True
@@ -480,6 +510,10 @@ def _is_our_daemon(pid: int) -> bool:
     """Guard against PID reuse: the live pid must actually be our daemon."""
     if not _pid_alive(pid):
         return False
+    if sys.platform == "win32":
+        # Avoid spawning PowerShell/WMI just to read command lines; those helpers
+        # are the common source of visible console flashes during Cursor hooks.
+        return True
     cmd = _proc_cmdline(pid)
     # If we couldn't read the command line, fall back to existence (best effort).
     if not cmd:
@@ -527,7 +561,7 @@ def stop_daemon() -> str:
         PID_FILE.unlink(missing_ok=True)
         return "not running"
     if sys.platform == "win32":
-        subprocess.run(["taskkill", "/PID", str(pid), "/F"], capture_output=True, timeout=10, **_NO_WINDOW)
+        _win_terminate(pid)
     else:
         try:
             os.kill(pid, signal.SIGTERM)

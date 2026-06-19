@@ -91,11 +91,13 @@ clashpilot install-service
   "version": 1,
   "hooks": {
     "sessionStart": [
-      { "command": "clashpilot hook" }
+      { "command": "clashpilotw hook" }
     ]
   }
 }
 ```
+
+> Windows 推荐使用 `clashpilotw hook`，它是无控制台窗口入口；macOS / Linux 可继续使用 `clashpilot hook`。
 
 ## 命令
 

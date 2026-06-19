@@ -33,6 +33,10 @@ clashpilot = "clashpilot.__main__:main"
 # Short alias: `clp up` == `clashpilot up`.
 clp = "clashpilot.__main__:main"
 
+[project.gui-scripts]
+# Windowless entry point for Windows hooks/background launchers.
+clashpilotw = "clashpilot.__main__:main"
+
 [tool.hatch.build.targets.wheel]
 packages = ["clashpilot"]
 # Ship the offline-fallback node list bundled inside the package.
