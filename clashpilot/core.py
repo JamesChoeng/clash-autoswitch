@@ -28,8 +28,17 @@ from .config import CONFIG_FILE, CORE_DIR, MANAGED_DIR
 
 GITHUB_REPO = "MetaCubeX/mihomo"
 
-# On Windows, console helpers flash a window unless explicitly suppressed.
-_NO_WINDOW = {"creationflags": subprocess.CREATE_NO_WINDOW} if sys.platform == "win32" else {}
+# On Windows, the mihomo console child flashes a window unless suppressed. Belt
+# and suspenders: CREATE_NO_WINDOW *and* a hidden STARTUPINFO, since the creation
+# flag alone still flashes on some setups (GUI/pythonw parents, certain shells).
+def _win_no_window() -> dict:
+    si = subprocess.STARTUPINFO()
+    si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    si.wShowWindow = subprocess.SW_HIDE
+    return {"creationflags": subprocess.CREATE_NO_WINDOW, "startupinfo": si}
+
+
+_NO_WINDOW = _win_no_window() if sys.platform == "win32" else {}
 _WIN_STILL_ACTIVE = 259
 
 CORE_PID_FILE = CORE_DIR / "mihomo.pid"

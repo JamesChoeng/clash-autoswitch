@@ -107,9 +107,17 @@ GROUP_TYPES = {
 }
 
 
-# On Windows, console helpers (tasklist/taskkill) flash a window unless we
-# explicitly suppress it. Reuse the same flag for every subprocess we spawn.
-_NO_WINDOW = {"creationflags": subprocess.CREATE_NO_WINDOW} if sys.platform == "win32" else {}
+# On Windows, any console child flashes a window unless we suppress it. Belt and
+# suspenders: CREATE_NO_WINDOW *and* a hidden STARTUPINFO, since on some setups
+# (GUI/pythonw parents, certain shells) the creation flag alone still flashes.
+def _win_no_window() -> dict:
+    si = subprocess.STARTUPINFO()
+    si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    si.wShowWindow = subprocess.SW_HIDE
+    return {"creationflags": subprocess.CREATE_NO_WINDOW, "startupinfo": si}
+
+
+_NO_WINDOW = _win_no_window() if sys.platform == "win32" else {}
 _WIN_STILL_ACTIVE = 259
 
 # Cross-call state for hysteresis / anti-flap. Module-level because pick_and_switch
