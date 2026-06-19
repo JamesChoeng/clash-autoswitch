@@ -80,24 +80,24 @@ clashpilot install-service
 
 撤销：`clashpilot uninstall-service`。
 
-> macOS 使用 launchd、Linux 使用 systemd --user、Windows 使用登录计划任务；安装后立即启动，无需注销重登。
+> macOS 使用 launchd、Linux 使用 systemd --user、Windows 优先使用登录计划任务；若计划任务被系统拒绝，会自动退回到无窗口 Startup 启动脚本。安装后立即启动，无需注销重登。
 
 ## 让 Cursor 等 AI 工具保持在线
 
-将以下内容加入 `~/.cursor/hooks.json`，每次会话开始时自动确保代理就绪：
+Windows 推荐使用上面的 `clashpilot install-service`，不要在 Cursor 启动时反复跑 hook，避免 Windows 短命 shell 窗口闪烁。
+
+macOS / Linux 如需在 Cursor 会话开始时兜底启动，可将以下内容加入 `~/.cursor/hooks.json`：
 
 ```jsonc
 {
   "version": 1,
   "hooks": {
     "sessionStart": [
-      { "command": "clashpilotw hook" }
+      { "command": "clashpilot hook" }
     ]
   }
 }
 ```
-
-> Windows 推荐使用 `clashpilotw hook`，它是无控制台窗口入口；macOS / Linux 可继续使用 `clashpilot hook`。
 
 ## 命令
 

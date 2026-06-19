@@ -3,7 +3,8 @@
 One command per platform, paths filled in automatically -- no hand-editing:
   - macOS : launchd LaunchAgent (~/Library/LaunchAgents)
   - Linux : systemd --user unit (~/.config/systemd/user)
-  - Windows: Scheduled Task triggered at logon (schtasks)
+  - Windows: Scheduled Task triggered at logon (schtasks), falling back to a
+             Startup-folder VBS launcher when Task Scheduler denies access.
 
 All three run `<python> -m clashpilot up` (the full standalone stack: core +
 system proxy + autoswitch), restart on crash where the init system supports it,
@@ -12,6 +13,7 @@ and survive logout/login.
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -127,7 +129,33 @@ def _uninstall_linux() -> str:
     return f"removed systemd --user unit: {path}"
 
 
-# --- Windows (Scheduled Task at logon) --------------------------------------
+# --- Windows (Scheduled Task at logon, Startup VBS fallback) -----------------
+
+
+def _windows_startup_dir() -> Path:
+    appdata = os.getenv("APPDATA")
+    base = Path(appdata) if appdata else Path.home() / "AppData" / "Roaming"
+    return base / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Startup"
+
+
+def _startup_vbs_path() -> Path:
+    return _windows_startup_dir() / "clashpilot-start.vbs"
+
+
+def _startup_vbs() -> str:
+    return (
+        'Set WshShell = CreateObject("WScript.Shell")\n'
+        f'WshShell.Run """{PYTHON}"" -m clashpilot up", 0, False\n'
+    )
+
+
+def _install_windows_startup_vbs(reason: str | None = None) -> str:
+    path = _startup_vbs_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(_startup_vbs(), encoding="utf-8")
+    _run(["wscript.exe", str(path)])
+    prefix = f"`schtasks /Create` failed; using Startup launcher instead:\n{reason}\n" if reason else ""
+    return f"{prefix}installed Startup launcher: {path}\nstarts at login + started now.".rstrip()
 
 
 def _install_windows() -> str:
@@ -138,7 +166,7 @@ def _install_windows() -> str:
         "/TR", tr, "/RL", "LIMITED", "/F",
     ])
     if code != 0:
-        return f"`schtasks /Create` failed:\n{out}".rstrip()
+        return _install_windows_startup_vbs(out.rstrip())
     # Kick it off now so the user doesn't have to log out/in to start it.
     _run(["schtasks", "/Run", "/TN", TASK_NAME])
     return f"installed scheduled task '{TASK_NAME}' (runs at logon + started now)."
@@ -147,9 +175,17 @@ def _install_windows() -> str:
 def _uninstall_windows() -> str:
     _run(["schtasks", "/End", "/TN", TASK_NAME])
     code, out = _run(["schtasks", "/Delete", "/TN", TASK_NAME, "/F"])
-    if code != 0:
-        return f"not installed or delete failed:\n{out}".rstrip()
-    return f"removed scheduled task '{TASK_NAME}'."
+    vbs = _startup_vbs_path()
+    removed_vbs = vbs.exists()
+    vbs.unlink(missing_ok=True)
+    parts = []
+    if code == 0:
+        parts.append(f"removed scheduled task '{TASK_NAME}'")
+    else:
+        parts.append(f"scheduled task not installed or delete failed:\n{out}".rstrip())
+    if removed_vbs:
+        parts.append(f"removed Startup launcher: {vbs}")
+    return "\n".join(parts).rstrip()
 
 
 # --- Dispatch ----------------------------------------------------------------

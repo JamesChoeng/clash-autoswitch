@@ -80,24 +80,24 @@ clashpilot install-service
 
 Remove it: `clashpilot uninstall-service`.
 
-> Uses launchd on macOS, a systemd --user unit on Linux, and a logon Scheduled Task on Windows; it starts immediately, no logout/login needed.
+> Uses launchd on macOS, a systemd --user unit on Linux, and a logon Scheduled Task on Windows. If Task Scheduler denies access, Windows automatically falls back to a windowless Startup launcher. It starts immediately, no logout/login needed.
 
 ## Keep Cursor & other AI tools online
 
-Add this to `~/.cursor/hooks.json` to ensure the proxy is ready at the start of every session:
+On Windows, prefer `clashpilot install-service` above instead of running a Cursor startup hook; repeated hook launches can flash short-lived shell windows.
+
+On macOS / Linux, add this to `~/.cursor/hooks.json` if you want Cursor sessions to ensure the proxy is running:
 
 ```jsonc
 {
   "version": 1,
   "hooks": {
     "sessionStart": [
-      { "command": "clashpilotw hook" }
+      { "command": "clashpilot hook" }
     ]
   }
 }
 ```
-
-> On Windows, prefer `clashpilotw hook`; it uses a windowless entry point. macOS / Linux can keep using `clashpilot hook`.
 
 ## Commands
 
