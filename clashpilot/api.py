@@ -52,34 +52,71 @@ def _verge_dirs() -> list[Path]:
     ]
 
 
+def _read_controller(cfg: Path) -> tuple[str | None, str]:
+    """Parse (external-controller, secret) out of a Clash/Mihomo config.yaml."""
+    if not cfg.exists():
+        return None, ""
+    try:
+        text = cfg.read_text(encoding="utf-8", errors="replace")
+    except Exception:  # noqa: BLE001
+        return None, ""
+    controller, secret = None, ""
+    m = re.search(r"^external-controller:\s*([^\s#]+)", text, re.MULTILINE)
+    if m:
+        controller = m.group(1).strip().strip('"').strip("'")
+    m = re.search(r"^secret:\s*([^\s#]+)", text, re.MULTILINE)
+    if m:
+        secret = m.group(1).strip().strip('"').strip("'")
+    return controller, secret
+
+
 def _discover() -> tuple[str | None, str]:
-    """Return (controller 'host:port' or None, secret)."""
+    """Return (controller 'host:port' or None, secret).
+
+    Priority: explicit env vars -> our own managed config (standalone mode) ->
+    an existing Clash Verge install (legacy / shared-core mode).
+    """
     env_ctrl = os.getenv("CLASH_CONTROLLER")
     env_secret = os.getenv("CLASH_SECRET")
     if env_ctrl:
         return env_ctrl, env_secret or ""
 
+    # Standalone: the config.yaml we generate and launch mihomo with.
+    try:
+        from .config import CONFIG_FILE
+
+        c, s = _read_controller(CONFIG_FILE)
+        if c:
+            return c, s or env_secret or ""
+    except Exception:  # noqa: BLE001
+        pass
+
+    # Legacy: a running Clash Verge Rev we attach to.
     controller, secret = None, ""
     for d in _verge_dirs():
-        cfg = d / "config.yaml"
-        if not cfg.exists():
-            continue
-        try:
-            text = cfg.read_text(encoding="utf-8", errors="replace")
-        except Exception:  # noqa: BLE001
-            continue
-        m = re.search(r"^external-controller:\s*([^\s#]+)", text, re.MULTILINE)
-        if m:
-            controller = m.group(1).strip().strip('"').strip("'")
-        m = re.search(r"^secret:\s*([^\s#]+)", text, re.MULTILINE)
-        if m:
-            secret = m.group(1).strip().strip('"').strip("'")
+        c, s = _read_controller(d / "config.yaml")
+        if c:
+            controller = c
+        if s:
+            secret = s
         if controller:
             break
     return controller, secret or env_secret or "set-your-secret"
 
 
 CONTROLLER, SECRET = _discover()
+
+
+def reconfigure() -> tuple[str | None, str]:
+    """Re-run discovery and refresh the module globals.
+
+    Used after standalone bring-up writes the managed config so subsequent
+    requests target the core we just launched (the values are otherwise frozen
+    at import time, before the config exists).
+    """
+    global CONTROLLER, SECRET
+    CONTROLLER, SECRET = _discover()
+    return CONTROLLER, SECRET
 
 
 def _build_raw(method: str, path: str, body: str | None) -> bytes:

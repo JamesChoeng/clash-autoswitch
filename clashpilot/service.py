@@ -1,12 +1,13 @@
-"""Install/uninstall clash-autoswitch as a login-launched background service.
+"""Install/uninstall clashpilot as a login-launched background service.
 
 One command per platform, paths filled in automatically -- no hand-editing:
   - macOS : launchd LaunchAgent (~/Library/LaunchAgents)
   - Linux : systemd --user unit (~/.config/systemd/user)
   - Windows: Scheduled Task triggered at logon (schtasks)
 
-All three run `<python> -m clash_autoswitch run`, restart on crash where the
-init system supports it, and survive logout/login.
+All three run `<python> -m clashpilot up` (the full standalone stack: core +
+system proxy + autoswitch), restart on crash where the init system supports it,
+and survive logout/login.
 """
 
 from __future__ import annotations
@@ -17,8 +18,8 @@ from pathlib import Path
 
 from .daemon import PYTHON, _NO_WINDOW
 
-LABEL = "com.clash-autoswitch"
-TASK_NAME = "clash-autoswitch"
+LABEL = "com.clashpilot"
+TASK_NAME = "clashpilot"
 
 
 def _run(cmd: list[str]) -> tuple[int, str]:
@@ -43,17 +44,17 @@ def _launchd_plist() -> str:
     <array>
         <string>{PYTHON}</string>
         <string>-m</string>
-        <string>clash_autoswitch</string>
-        <string>run</string>
+        <string>clashpilot</string>
+        <string>up</string>
     </array>
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
     <true/>
     <key>StandardOutPath</key>
-    <string>/tmp/clash-autoswitch.out.log</string>
+    <string>/tmp/clashpilot.out.log</string>
     <key>StandardErrorPath</key>
-    <string>/tmp/clash-autoswitch.err.log</string>
+    <string>/tmp/clashpilot.err.log</string>
 </dict>
 </plist>
 """
@@ -88,12 +89,12 @@ def _systemd_unit_path() -> Path:
 
 def _systemd_unit() -> str:
     return f"""[Unit]
-Description=Clash auto-switch (fastest-node picker + failover)
+Description=clashpilot (standalone fastest-node Clash client + failover)
 After=network-online.target
 
 [Service]
 Type=simple
-ExecStart={PYTHON} -m clash_autoswitch run
+ExecStart={PYTHON} -m clashpilot up
 Restart=always
 RestartSec=5
 
@@ -131,7 +132,7 @@ def _uninstall_linux() -> str:
 
 def _install_windows() -> str:
     # /SC ONLOGON for the current user; pythonw keeps it windowless.
-    tr = f'"{PYTHON}" -m clash_autoswitch run'
+    tr = f'"{PYTHON}" -m clashpilot up'
     code, out = _run([
         "schtasks", "/Create", "/TN", TASK_NAME, "/SC", "ONLOGON",
         "/TR", tr, "/RL", "LIMITED", "/F",

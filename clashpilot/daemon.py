@@ -1,14 +1,18 @@
-"""Clash proxy auto-switch: scan nodes, pick best, daemon lifecycle.
+"""clashpilot: scan nodes, pick best, daemon + standalone lifecycle.
 
 Drives Mihomo via its external-controller (TCP on macOS/Linux/Windows, with a
 Windows named-pipe fallback -- see api). Targets Cursor + Anthropic by default.
 Process management (pid check / start / stop) is cross-platform.
 
-Tunable knobs are read from AUTOSWITCH_* environment variables at import time;
+In standalone mode (bring_up/bring_down) clashpilot also downloads + supervises
+its own mihomo core and sets the system proxy; in legacy mode (run_daemon) it
+just attaches to a core someone else runs.
+
+Tunable knobs are read from CLASHPILOT_* environment variables at import time;
 sensible defaults preserve the original behavior when nothing is set.
 
-State (pid + log files) lives under a per-user directory, overridable with
-AUTOSWITCH_STATE_DIR, so the package works no matter where it's installed.
+State (downloaded core, managed config, pid + log files) lives under a per-user
+directory, overridable with CLASHPILOT_STATE_DIR.
 """
 
 from __future__ import annotations
@@ -24,30 +28,12 @@ import urllib.parse
 from datetime import datetime
 from pathlib import Path
 
+from . import api, config, core, sysproxy
 from .api import ControllerError, ControllerUnreachable, get_json, request
+from .config import STATE_DIR
 
-
-def _default_state_dir() -> Path:
-    """Per-user, per-platform writable dir for pid/log files."""
-    home = Path.home()
-    app = "clash-autoswitch"
-    if sys.platform == "win32":
-        base = os.getenv("LOCALAPPDATA") or str(home / "AppData" / "Local")
-        return Path(base) / app
-    if sys.platform == "darwin":
-        return home / "Library" / "Application Support" / app
-    base = os.getenv("XDG_STATE_HOME") or str(home / ".local" / "state")
-    return Path(base) / app
-
-
-STATE_DIR = Path(os.getenv("AUTOSWITCH_STATE_DIR") or _default_state_dir())
-try:
-    STATE_DIR.mkdir(parents=True, exist_ok=True)
-except OSError:
-    STATE_DIR = Path.home()
-
-LOG_FILE = STATE_DIR / "autoswitch.log"
-PID_FILE = STATE_DIR / "autoswitch.pid"
+LOG_FILE = STATE_DIR / "clashpilot.log"
+PID_FILE = STATE_DIR / "clashpilot.pid"
 
 
 def _python_exe() -> Path:
@@ -86,30 +72,32 @@ _DEFAULT_TARGETS = [
     "https://api2.cursor.sh",
     "https://api.anthropic.com/v1/messages",
 ]
-TARGETS = [t.strip() for t in _env_str("AUTOSWITCH_TARGETS", "").split(",") if t.strip()] or _DEFAULT_TARGETS
+TARGETS = [t.strip() for t in _env_str("CLASHPILOT_TARGETS", "").split(",") if t.strip()] or _DEFAULT_TARGETS
 
 # Latency probe (full scan / scoring) -- generous so slow-but-usable nodes rank.
-DELAY_TIMEOUT_MS = _env_int("AUTOSWITCH_DELAY_TIMEOUT_MS", 4000)
+DELAY_TIMEOUT_MS = _env_int("CLASHPILOT_DELAY_TIMEOUT_MS", 4000)
 # Liveness probe (health loop) -- shorter; we only care "up or not", not how fast.
-HEALTH_TIMEOUT_MS = _env_int("AUTOSWITCH_HEALTH_TIMEOUT_MS", 2500)
+HEALTH_TIMEOUT_MS = _env_int("CLASHPILOT_HEALTH_TIMEOUT_MS", 2500)
 # Which HTTP statuses count as a successful probe (Mihomo `expected` syntax).
-DELAY_EXPECTED = _env_str("AUTOSWITCH_DELAY_EXPECTED", "200-599")
+DELAY_EXPECTED = _env_str("CLASHPILOT_DELAY_EXPECTED", "200-599")
 
-FULL_SCAN_INTERVAL = _env_int("AUTOSWITCH_FULL_SCAN_INTERVAL", 180)
-HEALTH_INTERVAL = _env_int("AUTOSWITCH_HEALTH_INTERVAL", 15)
-HEALTH_RETRIES = _env_int("AUTOSWITCH_HEALTH_RETRIES", 3)
-HEALTH_FAIL_THRESHOLD = _env_int("AUTOSWITCH_HEALTH_FAIL_THRESHOLD", 3)
-SWITCH_TOLERANCE_MS = _env_int("AUTOSWITCH_SWITCH_TOLERANCE_MS", 150)
-MAX_WORKERS = _env_int("AUTOSWITCH_MAX_WORKERS", 10)
+FULL_SCAN_INTERVAL = _env_int("CLASHPILOT_FULL_SCAN_INTERVAL", 180)
+HEALTH_INTERVAL = _env_int("CLASHPILOT_HEALTH_INTERVAL", 15)
+HEALTH_RETRIES = _env_int("CLASHPILOT_HEALTH_RETRIES", 3)
+HEALTH_FAIL_THRESHOLD = _env_int("CLASHPILOT_HEALTH_FAIL_THRESHOLD", 3)
+SWITCH_TOLERANCE_MS = _env_int("CLASHPILOT_SWITCH_TOLERANCE_MS", 150)
+MAX_WORKERS = _env_int("CLASHPILOT_MAX_WORKERS", 10)
 
 # Don't optimization-switch more often than this many seconds (failover bypasses
 # it). Prevents flapping between near-equal nodes across consecutive scans.
-SWITCH_COOLDOWN = _env_int("AUTOSWITCH_SWITCH_COOLDOWN", 60)
+SWITCH_COOLDOWN = _env_int("CLASHPILOT_SWITCH_COOLDOWN", 60)
 # How many consecutive scans we may defer an optimization switch because of an
 # in-flight Cursor/Anthropic connection before forcing it through.
-MAX_DEFER = _env_int("AUTOSWITCH_MAX_DEFER", 5)
+MAX_DEFER = _env_int("CLASHPILOT_MAX_DEFER", 5)
 # Rotate the log once it grows past this many bytes (single .1 backup kept).
-LOG_MAX_BYTES = _env_int("AUTOSWITCH_LOG_MAX_BYTES", 1_000_000)
+LOG_MAX_BYTES = _env_int("CLASHPILOT_LOG_MAX_BYTES", 1_000_000)
+# Standalone mode: re-fetch the subscription + reload the core this often (0=off).
+SUB_REFRESH_INTERVAL = _env_int("CLASHPILOT_SUB_REFRESH_INTERVAL", 21600)
 
 INFO_KEYWORDS = ("流量", "剩余", "套餐", "到期", "expire", "重置", "官网", "订阅", "GB", "购买", "续费")
 GROUP_TYPES = {
@@ -401,6 +389,13 @@ def format_scan(top_n: int = 10) -> str:
 
 
 def format_status() -> str:
+    sub = config.subscription_url()
+    core_line = (
+        f"core_running={core.core_running()}\n"
+        f"core_version={core.core_version() or 'n/a'}\n"
+        f"subscription={'(set)' if sub else '(none)'}\n"
+        f"mixed_port={config.mixed_port()}\n"
+    )
     try:
         proxies = fetch_proxies()
         group = target_group(proxies)
@@ -408,13 +403,18 @@ def format_status() -> str:
         alive = is_alive(node) if node else False
         mode = current_mode()
     except ControllerUnreachable as e:
-        return f"controller_unreachable: {e}\ndaemon_running={daemon_pid() is not None}"
+        return (
+            f"controller_unreachable: {e}\n"
+            f"{core_line}"
+            f"daemon_running={daemon_pid() is not None}"
+        )
     daemon = daemon_pid()
     return (
         f"mode={mode}\n"
         f"group={group}\n"
         f"current_node={node}\n"
         f"node_alive={alive}\n"
+        f"{core_line}"
         f"daemon_running={daemon is not None}\n"
         f"daemon_pid={daemon or 'n/a'}\n"
         f"state_dir={STATE_DIR}\n"
@@ -485,7 +485,7 @@ def _is_our_daemon(pid: int) -> bool:
     # If we couldn't read the command line, fall back to existence (best effort).
     if not cmd:
         return True
-    return "clash_autoswitch" in cmd or "clash-autoswitch" in cmd or "autoswitch" in cmd
+    return "clashpilot" in cmd
 
 
 def daemon_pid() -> int | None:
@@ -505,7 +505,7 @@ def start_daemon() -> str:
     kwargs: dict = {**_NO_WINDOW}
     if sys.platform != "win32":
         kwargs["start_new_session"] = True  # detach so it survives parent exit
-    subprocess.Popen([str(PYTHON), "-m", "clash_autoswitch", "run"], **kwargs)
+    subprocess.Popen([str(PYTHON), "-m", "clashpilot", "up"], **kwargs)
     # Poll instead of a fixed sleep so we return as soon as the pid file lands.
     deadline = time.time() + 5
     while time.time() < deadline:
@@ -551,6 +551,7 @@ def switch_to(node: str) -> str:
 
 
 def run_daemon() -> None:
+    """Legacy controller-only loop: attach to a core/Verge someone else runs."""
     if not _acquire_singleton():
         return
 
@@ -570,11 +571,87 @@ def run_daemon() -> None:
         PID_FILE.unlink(missing_ok=True)
 
 
-def _run_loop() -> None:
+def _wait_controller(timeout: int = 20) -> bool:
+    """Poll the freshly-launched core's controller until it answers."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            get_json("/version")
+            return True
+        except ControllerError:
+            time.sleep(0.5)
+    return False
+
+
+def bring_up() -> None:
+    """Standalone: download core, build config, launch core, set proxy, run.
+
+    Blocks in the autoswitch loop; on any exit path the core is stopped and the
+    system proxy is restored.
+    """
+    if not _acquire_singleton():
+        return
+
+    def _cleanup(*_args) -> None:
+        bring_down()
+        PID_FILE.unlink(missing_ok=True)
+        sys.exit(0)
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            signal.signal(sig, _cleanup)
+        except (ValueError, OSError):
+            pass
+
+    try:
+        log("== standalone up: ensuring mihomo core")
+        core.ensure_core()
+        if not config.subscription_url():
+            log("!! no subscription set -- run: clashpilot set-sub <url>")
+            print("no subscription set; run: clashpilot set-sub <url>")
+            return
+        config.ensure_config()
+        api.reconfigure()
+        pid = core.start_core()
+        log(f"== core started (pid {pid}); version {core.core_version()}")
+        if not _wait_controller(20):
+            log("!! controller not reachable after start -- check core log")
+        if sysproxy.set_system_proxy("127.0.0.1", config.mixed_port()):
+            log(f"== system proxy set -> 127.0.0.1:{config.mixed_port()}")
+        else:
+            log("!! could not set system proxy automatically (set it manually)")
+        _run_loop(manage_subscription=True)
+    finally:
+        bring_down()
+        PID_FILE.unlink(missing_ok=True)
+
+
+def bring_down() -> None:
+    """Tear down standalone mode: remove the system proxy and stop the core."""
+    if sysproxy.unset_system_proxy():
+        log("== system proxy removed")
+    if core.stop_core():
+        log("== core stopped")
+
+
+def _reload_core_config() -> bool:
+    """Ask the running core to reload our managed config from disk."""
+    try:
+        status, _ = request(
+            "PUT", "/configs?force=true",
+            body=json.dumps({"path": str(config.CONFIG_FILE)}),
+        )
+        return status in (204, 200)
+    except ControllerError:
+        return False
+
+
+def _run_loop(manage_subscription: bool = False) -> None:
     group: str | None = None
-    log(f"== autoswitch start | targets={TARGETS}")
+    log(f"== clashpilot start | targets={TARGETS}")
     fails = 0
     last_full = time.time()
+    last_sub = time.time()
 
     # Immediate scan + switch at startup (mirrors original behavior), tolerant
     # of a controller that isn't up yet.
@@ -591,6 +668,21 @@ def _run_loop() -> None:
     while True:
         time.sleep(HEALTH_INTERVAL)
         try:
+            if (
+                manage_subscription
+                and SUB_REFRESH_INTERVAL > 0
+                and time.time() - last_sub >= SUB_REFRESH_INTERVAL
+            ):
+                last_sub = time.time()
+                try:
+                    config.update_subscription()
+                    if _reload_core_config():
+                        log("subscription refreshed + core reloaded")
+                    else:
+                        log("subscription refreshed (core reload failed)")
+                except Exception as e:  # noqa: BLE001
+                    log(f"!! subscription refresh failed: {type(e).__name__}: {e}")
+
             if group is None:
                 group = target_group()
                 log(f"== mode group='{group}'")
