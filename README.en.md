@@ -121,4 +121,6 @@ Data files live in: `%LOCALAPPDATA%\clashpilot` (Windows), `~/Library/Applicatio
 
 ## License
 
-MIT
+Source-available and free to use, but **not open source**: modification,
+redistribution, and derivative works are not permitted without authorization.
+See [LICENSE](LICENSE) (ClashPilot Source-Available License).

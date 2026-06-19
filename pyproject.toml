@@ -5,16 +5,16 @@ build-backend = "hatchling.build"
 [project]
 name = "clashpilot"
 version = "0.2.0"
-description = "Standalone Clash/Mihomo client that auto-picks the fastest node and fails over when it dies."
+description = "The best proxy tool for AI agents: auto-picks the fastest node and fails over when it dies."
 readme = "README.md"
 requires-python = ">=3.8"
-license = { text = "MIT" }
+license = { text = "ClashPilot Source-Available License" }
 authors = [{ name = "JamesChoeng", email = "jameschoeng@gmail.com" }]
 keywords = ["clash", "mihomo", "clash-verge", "proxy", "failover", "latency", "subscription", "standalone"]
 classifiers = [
     "Environment :: Console",
     "Intended Audience :: End Users/Desktop",
-    "License :: OSI Approved :: MIT License",
+    "License :: Other/Proprietary License",
     "Operating System :: MacOS",
     "Operating System :: Microsoft :: Windows",
     "Operating System :: POSIX :: Linux",

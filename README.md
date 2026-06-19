@@ -121,4 +121,4 @@ clashpilot update
 
 ## 许可证
 
-MIT
+源代码公开可见，可免费使用，但**不是开源软件**：未经授权禁止修改、二次分发或衍生。详见 [LICENSE](LICENSE)（ClashPilot Source-Available License）。
