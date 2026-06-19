@@ -8,16 +8,22 @@ It continuously probes every node in your subscription against your real targets
 
 ## Install
 
-```bash
-# run it without installing
-uvx clash-autoswitch status
+Installs straight from GitHub — no PyPI needed.
 
-# or install as a global command
-pipx install clash-autoswitch
-# (or) pip install clash-autoswitch
+```bash
+# run it without installing (requires uv + git)
+uvx --from git+https://github.com/JamesChoeng/clash-autoswitch clash-autoswitch status
+
+# or install as a global command (requires pipx + git)
+pipx install git+https://github.com/JamesChoeng/clash-autoswitch.git
+
+# plain pip works too
+pip install git+https://github.com/JamesChoeng/clash-autoswitch.git
 ```
 
-Requires Python 3.8+ and a running Clash Verge Rev / Mihomo with its external-controller enabled (Verge enables it by default).
+To update later: `pipx upgrade clash-autoswitch` (or re-run the install command).
+
+Requires Python 3.8+, git, and a running Clash Verge Rev / Mihomo with its external-controller enabled (Verge enables it by default).
 
 ## Usage
 
