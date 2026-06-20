@@ -24,7 +24,7 @@ macOS / Linux:
 curl -fsSL https://raw.githubusercontent.com/JamesChoeng/clashpilot/main/install.sh | sh
 ```
 
-Open a **new terminal** afterwards, then run `clashpilot up`.
+The installer registers a Cursor startup hook automatically; opening Cursor will start clashpilot. You can also open a **new terminal** and run `clashpilot up` manually.
 
 ### If you already have Python
 
@@ -84,19 +84,18 @@ Remove it: `clashpilot uninstall-service`.
 
 ## Keep Cursor & other AI tools online
 
-On Windows, prefer `clashpilot install-service` above instead of running a Cursor startup hook; repeated hook launches can flash short-lived shell windows.
+The one-line installer automatically registers a Cursor `sessionStart` hook. After that, opening Cursor runs `clashpilot hook` and starts the proxy silently in the background.
 
-On macOS / Linux, add this to `~/.cursor/hooks.json` if you want Cursor sessions to ensure the proxy is running:
+If you installed manually, or need to repair the hook config, run:
 
-```jsonc
-{
-  "version": 1,
-  "hooks": {
-    "sessionStart": [
-      { "command": "clashpilot hook" }
-    ]
-  }
-}
+```bash
+clashpilot install-cursor-hook
+```
+
+Remove the Cursor startup hook:
+
+```bash
+clashpilot uninstall-cursor-hook
 ```
 
 ## Commands
@@ -105,9 +104,11 @@ On macOS / Linux, add this to `~/.cursor/hooks.json` if you want Cursor sessions
 |---|---|
 | `clashpilot up` | Start: core + system proxy + autoswitch (foreground, `Ctrl-C` to stop) |
 | `clashpilot down` | Stop: shut down the background daemon/core and undo the system proxy |
-| `clashpilot status` | Show autoswitch / core / proxy / subscription status |
+| `clashpilot status` | Show autoswitch / core / proxy / subscription / current node / latency status |
 | `clashpilot set-sub URL` | Save your subscription link |
 | `clashpilot update` | Re-fetch the subscription and rebuild the config |
+| `clashpilot install-cursor-hook` | Register the Cursor startup hook so opening Cursor starts clashpilot |
+| `clashpilot uninstall-cursor-hook` | Remove the Cursor startup hook |
 | `clashpilot install-service` | Register a login-launched background service (restarts on crash) |
 | `clashpilot uninstall-service` | Remove the login-launched background service |
 | `clashpilot setup-path` | Add the command's directory to PATH |

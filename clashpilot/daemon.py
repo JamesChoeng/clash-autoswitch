@@ -199,6 +199,23 @@ def current_node(group: str | None = None, proxies: dict | None = None) -> str |
         return None
 
 
+def current_node_chain(group: str | None = None, proxies: dict | None = None) -> list[str]:
+    """Selection chain from the target group to the final proxy node."""
+    proxies = proxies if proxies is not None else fetch_proxies()
+    group = group or target_group(proxies)
+    node = (proxies.get(group) or {}).get("now")
+    chain = []
+    seen = set()
+    while node and node not in seen:
+        chain.append(node)
+        seen.add(node)
+        info = proxies.get(node) or {}
+        if info.get("type") not in GROUP_TYPES and "all" not in info:
+            break
+        node = info.get("now")
+    return chain
+
+
 def set_node(group: str, node: str) -> bool:
     try:
         status, _ = request(
@@ -221,6 +238,21 @@ def delay(node: str, url: str, timeout_ms: int = DELAY_TIMEOUT_MS) -> int | None
         return int(json.loads(body).get("delay") or 0) or None
     except Exception:  # noqa: BLE001
         return None
+
+
+def node_latency(node: str, timeout_ms: int = DELAY_TIMEOUT_MS) -> dict:
+    """Probe the current node against all targets and summarize its latency."""
+    targets = TARGETS
+    with cf.ThreadPoolExecutor(max_workers=max(1, len(targets))) as pool:
+        delays = list(pool.map(lambda url: delay(node, url, timeout_ms), targets))
+    reachable = [d for d in delays if d is not None]
+    avg = int(sum(reachable) / len(reachable)) if reachable else None
+    return {
+        "average": avg,
+        "reachable": len(reachable),
+        "total": len(targets),
+        "targets": list(zip(targets, delays)),
+    }
 
 
 def is_alive(node: str) -> bool:
@@ -408,8 +440,9 @@ def format_status() -> str:
     try:
         proxies = fetch_proxies()
         group = target_group(proxies)
-        node = current_node(group, proxies)
-        alive = is_alive(node) if node else False
+        chain = current_node_chain(group, proxies)
+        node = chain[-1] if chain else None
+        latency = node_latency(node) if node else None
         mode = current_mode()
     except ControllerUnreachable as e:
         return (
@@ -422,7 +455,9 @@ def format_status() -> str:
         f"mode={mode}\n"
         f"group={group}\n"
         f"current_node={node}\n"
-        f"node_alive={alive}\n"
+        f"node_route={' -> '.join(chain) if chain else 'n/a'}\n"
+        f"node_latency_ms={(latency or {}).get('average') or 'n/a'}\n"
+        f"node_reachable_targets={(latency or {}).get('reachable', 0)}/{(latency or {}).get('total', len(TARGETS))}\n"
         f"{core_line}"
         f"daemon_running={daemon is not None}\n"
         f"daemon_pid={daemon or 'n/a'}\n"

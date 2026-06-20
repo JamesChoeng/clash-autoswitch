@@ -20,7 +20,7 @@ from pathlib import Path
 # Mirror so first-time / refresh downloads survive GitHub being blocked in CN.
 os.environ.setdefault("CLASHPILOT_GH_PROXY", "https://ghfast.top")
 
-from . import __version__, config, core, daemon, pathsetup, service, sysproxy
+from . import __version__, config, core, cursorhook, daemon, pathsetup, service, sysproxy
 
 _GEO_BASE = "https://ghfast.top/https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/"
 _GEO_FILES = ("geoip.metadb", "geosite.dat")
@@ -122,18 +122,48 @@ def _cmd_down(_args: argparse.Namespace) -> int:
     return 0
 
 
+def _console_safe(line: str) -> str:
+    encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
+    return line.encode(encoding, errors="replace").decode(encoding, errors="replace")
+
+
 def _cmd_status(_args: argparse.Namespace) -> int:
-    print(f"clashpilot {__version__}")
-    print(f"  autoswitch:   {'running' if daemon.daemon_pid() else 'stopped'} (pid {daemon.daemon_pid()})")
-    print(f"  core running: {core.core_running()} (pid {core.core_pid()})")
-    print(f"  core version: {core.core_version()}")
+    daemon_pid = daemon.daemon_pid()
+
+    def out(line: str) -> None:
+        print(_console_safe(line))
+
+    out(f"clashpilot {__version__}")
+    out(f"  autoswitch:   {'running' if daemon_pid else 'stopped'} (pid {daemon_pid or 'n/a'})")
+    out(f"  core running: {core.core_running()} (pid {core.core_pid()})")
+    out(f"  core version: {core.core_version()}")
     if config.using_default_subscription():
-        print(f"  subscription: (default) {config.DEFAULT_SUBSCRIPTION_URL}")
+        out(f"  subscription: (default) {config.DEFAULT_SUBSCRIPTION_URL}")
     else:
-        print(f"  subscription: {config.subscription_url()}")
-    print(f"  proxy:        127.0.0.1:{config.mixed_port()}")
-    print(f"  controller:   127.0.0.1:{config.controller_port()}")
-    print(f"  state dir:    {config.STATE_DIR}")
+        out(f"  subscription: {config.subscription_url()}")
+    out(f"  proxy:        127.0.0.1:{config.mixed_port()}")
+    out(f"  controller:   127.0.0.1:{config.controller_port()}")
+    try:
+        proxies = daemon.fetch_proxies()
+        mode = daemon.current_mode()
+        group = daemon.target_group(proxies)
+        chain = daemon.current_node_chain(group, proxies)
+        node = chain[-1] if chain else None
+        out(f"  mode:         {mode}")
+        out(f"  group:        {group}")
+        out(f"  node:         {node or 'n/a'}")
+        if len(chain) > 1:
+            out(f"  node route:   {' -> '.join(chain)}")
+        if node:
+            latency = daemon.node_latency(node)
+            average = latency["average"]
+            average_text = f"{average}ms avg" if average is not None else "timeout"
+            out(f"  latency:      {average_text} ({latency['reachable']}/{latency['total']} targets)")
+    except daemon.ControllerUnreachable as e:
+        out(f"  node:         n/a (controller unreachable: {e})")
+    except daemon.ControllerError as e:
+        out(f"  node:         n/a (controller error: {e})")
+    out(f"  state dir:    {config.STATE_DIR}")
     return 0
 
 
@@ -144,6 +174,16 @@ def _cmd_install_service(_args: argparse.Namespace) -> int:
 
 def _cmd_uninstall_service(_args: argparse.Namespace) -> int:
     print(service.uninstall_service())
+    return 0
+
+
+def _cmd_install_cursor_hook(_args: argparse.Namespace) -> int:
+    print(cursorhook.install_cursor_hook())
+    return 0
+
+
+def _cmd_uninstall_cursor_hook(_args: argparse.Namespace) -> int:
+    print(cursorhook.uninstall_cursor_hook())
     return 0
 
 
@@ -188,6 +228,14 @@ def _build_parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="command", required=True)
 
     sub.add_parser("hook", help="Cursor sessionStart entrypoint: ensure the background daemon is running.").set_defaults(func=_cmd_hook)
+    sub.add_parser(
+        "install-cursor-hook",
+        help="Register a Cursor sessionStart hook so opening Cursor starts clashpilot.",
+    ).set_defaults(func=_cmd_install_cursor_hook)
+    sub.add_parser(
+        "uninstall-cursor-hook",
+        help="Remove the Cursor sessionStart hook registered by clashpilot.",
+    ).set_defaults(func=_cmd_uninstall_cursor_hook)
     sub.add_parser("up", help="Core + system proxy + autoswitch in the foreground (Ctrl-C to stop).").set_defaults(func=_cmd_up)
     sub.add_parser("down", help="Stop the daemon/core and unset the system proxy.").set_defaults(func=_cmd_down)
     sub.add_parser("status", help="Show core / proxy / subscription status.").set_defaults(func=_cmd_status)

@@ -130,5 +130,18 @@ Write-Step "Installing clashpilot from $RepoUrl"
 & $py.Exe @($py.Args + @('-m', 'pipx', 'install', '--force', $RepoUrl))
 Sync-Path
 
+Write-Step 'Registering Cursor startup hook'
+$clashpilotCmd = Get-Command 'clashpilot' -ErrorAction SilentlyContinue
+if ($clashpilotCmd) {
+    & $clashpilotCmd.Source install-cursor-hook
+} else {
+    $fallback = Join-Path $env:USERPROFILE '.local\bin\clashpilot.exe'
+    if (Test-Path $fallback) {
+        & $fallback install-cursor-hook
+    } else {
+        Write-Warn 'could not find clashpilot on PATH yet; open a new terminal and run: clashpilot install-cursor-hook'
+    }
+}
+
 Write-Host ''
-Write-Step 'Done. Open a NEW terminal, then run:  clashpilot up'
+Write-Step 'Done. Open Cursor to auto-start clashpilot, or run now:  clashpilot up'
