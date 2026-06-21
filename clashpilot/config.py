@@ -24,6 +24,16 @@ import sys
 import urllib.request
 from pathlib import Path
 
+# LAN / link-local ranges kept off the TUN route table so local services stay reachable.
+_TUN_ROUTE_EXCLUDE = (
+    "127.0.0.0/8",
+    "192.168.0.0/16",
+    "10.0.0.0/8",
+    "172.16.0.0/12",
+    "fc00::/7",
+    "fe80::/10",
+)
+
 
 def _default_state_dir() -> Path:
     home = Path.home()
@@ -120,15 +130,42 @@ def _whitelist_env() -> str:
     ).strip().lower()
 
 
+def opus_filtering_enabled() -> bool:
+    """True when autoswitch should restrict nodes to Opus/Anthropic-eligible exits.
+
+    On by default (Cursor + Anthropic use case). Disable with
+    CLASHPILOT_OPUS_WHITELIST=0 or ``opus_filtering: false`` in settings.
+    """
+    env = _whitelist_env()
+    if env in ("0", "false", "off", "no"):
+        return False
+    if env in ("1", "true", "on", "yes"):
+        return True
+    s = get_settings()
+    if "opus_filtering" in s:
+        return bool(s["opus_filtering"])
+    return True
+
+
+def ensure_opus_filtering() -> None:
+    """Persist Opus filtering on first run unless the user opted out via env."""
+    if _whitelist_env() in ("0", "false", "off", "no"):
+        return
+    s = get_settings()
+    if "opus_filtering" not in s:
+        s["opus_filtering"] = True
+        save_settings(s)
+
+
 def opus_whitelist() -> list[str] | None:
     """Return the Opus-region node whitelist when filtering is active.
 
     Nodes must exit in Anthropic-supported countries (see opus_regions.py).
-    Filtering is on when CLASHPILOT_OPUS_WHITELIST=1, or when a non-empty
-    whitelist is saved after ``whitelist --refresh``. Set ...=0 to disable.
+    Filtering is on by default; set CLASHPILOT_OPUS_WHITELIST=0 to disable.
+    An empty list means filtering is active but not yet scanned -- run
+    ``whitelist --refresh`` or let ``clashpilot up`` scan on first start.
     """
-    env = _whitelist_env()
-    if env in ("0", "false", "off", "no"):
+    if not opus_filtering_enabled():
         return None
     s = get_settings()
     wl = s.get("opus_whitelist")
@@ -136,9 +173,7 @@ def opus_whitelist() -> list[str] | None:
         wl = s.get("claude_whitelist")  # legacy key
     if not isinstance(wl, list):
         wl = []
-    if env in ("1", "true", "on", "yes") or wl:
-        return wl
-    return None
+    return wl
 
 
 def opus_whitelist_meta() -> dict[str, str]:
@@ -191,6 +226,88 @@ def core_log_level() -> str:
         or DEFAULT_CORE_LOG_LEVEL
     ).strip().lower()
     return lvl if lvl in _CORE_LOG_LEVELS else DEFAULT_CORE_LOG_LEVEL
+
+
+def _env_bool(name: str) -> bool | None:
+    raw = (os.getenv(name) or "").strip().lower()
+    if raw in ("1", "true", "on", "yes"):
+        return True
+    if raw in ("0", "false", "off", "no"):
+        return False
+    return None
+
+
+def tun_enabled() -> bool:
+    """True when TUN mode should route traffic (env overrides saved settings)."""
+    env = _env_bool("CLASHPILOT_TUN")
+    if env is not None:
+        return env
+    return bool(get_settings().get("tun_enabled"))
+
+
+def set_tun_enabled(enabled: bool) -> None:
+    s = get_settings()
+    s["tun_enabled"] = enabled
+    save_settings(s)
+
+
+def ensure_macos_service_tun() -> bool:
+    """Enable TUN on first macOS `install-service` unless routing was already configured."""
+    if sys.platform != "darwin":
+        return False
+    if _env_bool("CLASHPILOT_TUN") is not None:
+        return False
+    s = get_settings()
+    if "tun_enabled" in s:
+        return False
+    set_tun_enabled(True)
+    return True
+
+
+def tun_stack() -> str:
+    """mihomo TUN stack: system / gvisor / mixed (platform-aware default)."""
+    raw = (os.getenv("CLASHPILOT_TUN_STACK") or get_settings().get("tun_stack") or "").strip().lower()
+    if raw in ("system", "gvisor", "mixed"):
+        return raw
+    # gvisor is generally more reliable on macOS; system elsewhere.
+    return "gvisor" if sys.platform == "darwin" else "system"
+
+
+def tun_mtu() -> int | None:
+    """Optional TUN MTU override (macOS often benefits from 9000)."""
+    raw = (os.getenv("CLASHPILOT_TUN_MTU") or get_settings().get("tun_mtu") or "").strip()
+    if not raw:
+        return 9000 if sys.platform == "darwin" else None
+    try:
+        return int(raw)
+    except ValueError:
+        return None
+
+
+def proxy_mode() -> str:
+    return "tun" if tun_enabled() else "system"
+
+
+def _tun_config_block() -> str:
+    """YAML fragment injected into the managed config when TUN mode is on."""
+    lines = [
+        "tun:",
+        "  enable: true",
+        f"  stack: {tun_stack()}",
+        "  auto-route: true",
+        "  auto-detect-interface: true",
+        "  dns-hijack:",
+        "    - any:53",
+        "    - tcp://any:53",
+        "  route-exclude-address:",
+    ]
+    lines.extend(f"    - {cidr}" for cidr in _TUN_ROUTE_EXCLUDE)
+    mtu = tun_mtu()
+    if mtu:
+        lines.append(f"  mtu: {mtu}")
+    if sys.platform == "linux" and _env_bool("CLASHPILOT_TUN_AUTO_REDIRECT") is True:
+        lines.extend(["  auto-redirect: true"])
+    return "\n".join(lines) + "\n"
 
 
 def get_secret() -> str:
@@ -249,7 +366,7 @@ def fetch_subscription(url: str | None = None) -> str:
 _OVERRIDE_KEYS = frozenset({
     "external-controller", "external-controller-tls", "secret", "external-ui",
     "mixed-port", "port", "socks-port", "redir-port", "tproxy-port",
-    "allow-lan", "bind-address", "mode", "log-level",
+    "allow-lan", "bind-address", "mode", "log-level", "tun",
 })
 
 _TOP_KEY_RE = re.compile(r"^([A-Za-z0-9_.-]+):")
@@ -308,6 +425,8 @@ def build_managed_config(subscription_text: str | None = None) -> Path:
         # quotes/spaces can't break the generated YAML.
         f"secret: {json.dumps(get_secret())}\n"
     )
+    if tun_enabled():
+        header += "\n" + _tun_config_block()
     MANAGED_DIR.mkdir(parents=True, exist_ok=True)
     CONFIG_FILE.write_text(header + "\n" + base + "\n", encoding="utf-8")
     return CONFIG_FILE

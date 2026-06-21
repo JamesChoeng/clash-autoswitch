@@ -8,7 +8,9 @@ from __future__ import annotations
 import argparse
 import datetime
 import os
+import subprocess
 import sys
+import time
 from pathlib import Path
 
 from . import __version__, api, config, core, daemon, pathsetup, service, sysproxy
@@ -60,7 +62,8 @@ def _prepare() -> None:
     """First-run prep shared by foreground/background bring-up: PATH, config,
     geo DBs, and the mihomo core binary. All steps are idempotent / cached."""
     _ensure_path_once()
-    config.ensure_config()
+    config.ensure_opus_filtering()
+    config.build_managed_config()
     _ensure_geo()
     core.ensure_core()
 
@@ -68,36 +71,99 @@ def _prepare() -> None:
 # --- Subcommands -------------------------------------------------------------
 
 
-def _cmd_up(_args: argparse.Namespace) -> int:
-    """Foreground: core + system proxy + autoswitch loop. Blocks until Ctrl-C."""
+def _console_safe(line: str) -> str:
+    encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
+    return line.encode(encoding, errors="replace").decode(encoding, errors="replace")
+
+
+def _console_notify(line: str) -> None:
+    print(_console_safe(line), flush=True)
+
+
+def _cmd_up(args: argparse.Namespace) -> int:
+    """Foreground: core + routing + autoswitch loop. Blocks until Ctrl-C."""
+    if getattr(args, "tun", False):
+        os.environ["CLASHPILOT_TUN"] = "1"
+    elif getattr(args, "no_tun", False):
+        os.environ["CLASHPILOT_TUN"] = "0"
+    if getattr(args, "persist_tun", False):
+        config.set_tun_enabled(config.tun_enabled())
+
     running = daemon.daemon_pid()
     if running:
         print(f"clashpilot already running (pid {running}); nothing to do.")
         print("  stop it with: clashpilot down")
         return 0
+
+    if getattr(args, "detach", False):
+        cmd = [str(daemon.PYTHON), "-m", "clashpilot", "up"]
+        if getattr(args, "tun", False):
+            cmd.append("--tun")
+        elif getattr(args, "no_tun", False):
+            cmd.append("--no-tun")
+        env = os.environ.copy()
+        subprocess.Popen(
+            cmd,
+            env=env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+            **getattr(daemon, "_NO_WINDOW", {}),
+        )
+        for _ in range(40):
+            time.sleep(0.25)
+            pid = daemon.daemon_pid()
+            if pid:
+                print(f"clashpilot started in background (pid {pid})")
+                print(f"  status: clashpilot status")
+                print(f"  stop:   clashpilot down")
+                print(f"  logs:   {daemon.LOG_FILE}")
+                return 0
+        print("clashpilot: background start timed out; check logs:", daemon.LOG_FILE, file=sys.stderr)
+        return 1
+
     print("clashpilot: preparing (config, geo databases, core)...")
     _prepare()
-    print("clashpilot up: core + system proxy + autoswitch (foreground, Ctrl-C to stop)")
-    print(f"  proxy:      127.0.0.1:{config.mixed_port()} (http+socks)")
+    routing = config.proxy_mode()
+    print(f"clashpilot up: core + {routing} routing + autoswitch (foreground, Ctrl-C to stop)")
+    if routing == "tun":
+        print(f"  routing:    TUN (stack={config.tun_stack()})")
+        if sys.platform == "darwin":
+            print("  note:       macOS TUN may require admin / network permission")
+    else:
+        print(f"  proxy:      127.0.0.1:{config.mixed_port()} (http+socks)")
+        if sys.platform == "darwin":
+            print("  tip:        Cursor may ignore system proxy; try: clp up --tun --persist-tun")
+    if config.opus_filtering_enabled():
+        wl = config.opus_whitelist() or []
+        print(f"  opus filter: on ({len(wl)} nodes cached; auto-scan on first run if empty)")
     print(f"  controller: 127.0.0.1:{config.controller_port()}")
     print(f"  core:       mihomo {core.core_version()}")
     print(f"  logs:       {daemon.LOG_FILE}")
-    daemon.bring_up()  # blocks in the autoswitch loop; tears down on exit
+    print("  tip:        runs in foreground; use `clp up -d` for background")
+    daemon.set_console_notify(_console_notify)
+    try:
+        if not daemon.bring_up():
+            print("clashpilot already running; use `clashpilot down` first.", file=sys.stderr)
+            return 1
+    finally:
+        daemon.set_console_notify(None)
     return 0
 
 
 def _cmd_down(_args: argparse.Namespace) -> int:
     dmsg = daemon.stop_daemon()  # stop foreground/background loop if any
     stopped = core.stop_core()   # ensure the core is down (idempotent)
-    unset = sysproxy.unset_system_proxy()
-    print(f"clashpilot down: daemon {dmsg}; core {'stopped' if stopped else 'not running'}, "
-          f"system proxy {'unset' if unset else 'unchanged'}")
+    if config.tun_enabled():
+        routing_msg = "TUN stopped"
+    else:
+        unset = sysproxy.unset_system_proxy()
+        routing_msg = f"system proxy {'unset' if unset else 'unchanged'}"
+    print(
+        f"clashpilot down: daemon {dmsg}; core {'stopped' if stopped else 'not running'}, "
+        f"{routing_msg}"
+    )
     return 0
-
-
-def _console_safe(line: str) -> str:
-    encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
-    return line.encode(encoding, errors="replace").decode(encoding, errors="replace")
 
 
 def _cmd_status(_args: argparse.Namespace) -> int:
@@ -117,15 +183,17 @@ def _cmd_status(_args: argparse.Namespace) -> int:
         out(f"  subscription: (default) {config.DEFAULT_SUBSCRIPTION_URL}")
     else:
         out(f"  subscription: {config.subscription_url()}")
+    mode = config.proxy_mode()
+    out(f"  routing:      {mode}" + (f" (stack={config.tun_stack()})" if mode == "tun" else ""))
     out(f"  proxy:        127.0.0.1:{config.mixed_port()}")
     out(f"  controller:   127.0.0.1:{config.controller_port()}")
     try:
         proxies = daemon.fetch_proxies()
-        mode = daemon.current_mode()
+        clash_mode = daemon.current_mode()
         group = daemon.target_group(proxies)
         chain = daemon.current_node_chain(group, proxies)
         node = chain[-1] if chain else None
-        out(f"  mode:         {mode}")
+        out(f"  mode:         {clash_mode}")
         out(f"  group:        {group}")
         out(f"  node:         {node or 'n/a'}")
         if len(chain) > 1:
@@ -135,9 +203,15 @@ def _cmd_status(_args: argparse.Namespace) -> int:
             average = latency["average"]
             average_text = f"{average}ms avg" if average is not None else "timeout"
             out(f"  latency:      {average_text} ({latency['reachable']}/{latency['total']} targets)")
+            anthropic_ok = daemon.anthropic_reachable(node)
+            out(f"  anthropic:    {'ok' if anthropic_ok else 'unreachable (will failover)'}")
         wl = config.opus_whitelist()
-        if wl is not None:
+        if wl is None:
+            out("  opus filter:  off")
+        elif wl:
             out(f"  opus wl:      {len(wl)} nodes (Opus-region pool)")
+        else:
+            out("  opus wl:      active, not scanned yet")
     except daemon.ControllerUnreachable as e:
         out(f"  node:         n/a (controller unreachable: {e})")
     except daemon.ControllerError as e:
@@ -146,8 +220,28 @@ def _cmd_status(_args: argparse.Namespace) -> int:
     return 0
 
 
-def _cmd_install_service(_args: argparse.Namespace) -> int:
-    print(service.install_service())
+def _cmd_scan(args: argparse.Namespace) -> int:
+    api.reconfigure()
+    if not core.core_running():
+        print(
+            "error: core is not running — start clashpilot first (clashpilot up)",
+            file=sys.stderr,
+        )
+        return 1
+    print(
+        _console_safe(
+            daemon.format_scan(
+                top_n=max(1, args.top),
+                all_nodes=getattr(args, "all_nodes", False),
+            )
+        )
+    )
+    return 0
+
+
+def _cmd_install_service(args: argparse.Namespace) -> int:
+    note = service._service_routing_preamble(args)
+    print(service.install_service(extra_note=note))
     return 0
 
 
@@ -208,13 +302,12 @@ def _cmd_whitelist(args: argparse.Namespace) -> int:
     wl = config.opus_whitelist()
     meta = config.opus_whitelist_meta()
     if wl is None:
-        saved = config.get_settings().get("opus_whitelist") or config.get_settings().get("claude_whitelist")
-        if isinstance(saved, list) and saved:
-            print(f"opus whitelist: {len(saved)} nodes saved but filtering disabled")
-            print("  enable: export CLASHPILOT_OPUS_WHITELIST=1")
-        else:
-            print("opus whitelist: not configured")
-            print("  scan nodes: clashpilot whitelist --refresh")
+        print("opus whitelist: filtering disabled")
+        print("  enable:  runs by default on `clp up`; or export CLASHPILOT_OPUS_WHITELIST=1")
+        return 0
+    if not wl:
+        print("opus whitelist: filtering active, no nodes scanned yet")
+        print("  scan nodes: clashpilot whitelist --refresh  (or start `clp up` to auto-scan)")
         return 0
     print(f"opus whitelist: {len(wl)} nodes (Opus-region filtering active)")
     for name in wl:
@@ -236,9 +329,49 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--version", action="version", version=f"clashpilot {__version__}")
     sub = p.add_subparsers(dest="command", required=True)
 
-    sub.add_parser("up", help="Core + system proxy + autoswitch in the foreground (Ctrl-C to stop).").set_defaults(func=_cmd_up)
-    sub.add_parser("down", help="Stop the daemon/core and unset the system proxy.").set_defaults(func=_cmd_down)
+    up = sub.add_parser("up", help="Core + routing + autoswitch in the foreground (Ctrl-C to stop).")
+    up.add_argument(
+        "--tun",
+        action="store_true",
+        help="route all traffic via mihomo TUN (no system proxy)",
+    )
+    up.add_argument(
+        "--no-tun",
+        action="store_true",
+        help="force system-proxy mode even if TUN is saved in settings",
+    )
+    up.add_argument(
+        "--persist-tun",
+        action="store_true",
+        help="save the TUN on/off choice from this run to settings",
+    )
+    up.add_argument(
+        "-d", "--detach",
+        action="store_true",
+        help="start in background and return immediately",
+    )
+    up.set_defaults(func=_cmd_up)
+    sub.add_parser("down", help="Stop the daemon/core and tear down routing.").set_defaults(func=_cmd_down)
     sub.add_parser("status", help="Show core / proxy / subscription status.").set_defaults(func=_cmd_status)
+
+    scan = sub.add_parser(
+        "scan",
+        help="Probe nodes and rank by latency (no switch). Requires a running core.",
+    )
+    scan.add_argument(
+        "-n", "--top",
+        type=int,
+        default=10,
+        metavar="N",
+        help="show top N nodes (default: 10)",
+    )
+    scan.add_argument(
+        "--all",
+        dest="all_nodes",
+        action="store_true",
+        help="scan every subscription node, not just the Opus whitelist pool",
+    )
+    scan.set_defaults(func=_cmd_scan)
 
     sp = sub.add_parser("set-sub", help="Save your Clash/Mihomo subscription URL.")
     sp.add_argument("url")
@@ -260,10 +393,21 @@ def _build_parser() -> argparse.ArgumentParser:
         "setup-path",
         help="Add the clashpilot/clp scripts dir to your user PATH (idempotent).",
     ).set_defaults(func=_cmd_setup_path)
-    sub.add_parser(
+    svc = sub.add_parser(
         "install-service",
         help="Run clashpilot in the background at login (restarts on crash).",
-    ).set_defaults(func=_cmd_install_service)
+    )
+    svc.add_argument(
+        "--tun",
+        action="store_true",
+        help="persist TUN routing in settings before installing the service",
+    )
+    svc.add_argument(
+        "--no-tun",
+        action="store_true",
+        help="persist system-proxy routing before installing the service",
+    )
+    svc.set_defaults(func=_cmd_install_service)
     sub.add_parser(
         "uninstall-service",
         help="Remove the login-launched background service.",

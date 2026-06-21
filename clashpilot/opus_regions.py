@@ -30,6 +30,8 @@ ANTHROPIC_SUPPORTED_REGIONS = frozenset({
 
 # Node-name hints unlikely to exit in an Anthropic-supported region.
 NAME_BLOCKLIST = (
+    "香港", "HONG KONG", "HK-", "-HK", "🇭🇰",
+    "澳门", "MACAU", "MACAO", "MO-", "-MO", "🇲🇴",
     "俄罗斯", "俄国", "RUSSIA", "RU-", "-RU", "🇷🇺",
     "大陆", "内地", "CHINA", "🇨🇳",
     "伊朗", "IRAN", "🇮🇷",

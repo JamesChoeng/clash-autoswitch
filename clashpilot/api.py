@@ -1,14 +1,7 @@
-r"""Cross-platform HTTP client for Mihomo's external-controller (Clash Verge).
+r"""HTTP client for Mihomo's external-controller API.
 
-Transport is chosen automatically:
-  - TCP  : the `external-controller: host:port` endpoint. Works on macOS,
-           Linux, and Windows. Preferred everywhere.
-  - Pipe : Windows named pipe (\\.\pipe\verge-mihomo) as a fallback when the
-           TCP controller is disabled/unreachable (common on Windows where
-           Verge defaults to the pipe).
-
-Host/port/secret are auto-discovered from Clash Verge's config.yaml; override
-with env vars CLASH_CONTROLLER (host:port) and CLASH_SECRET if needed.
+Uses TCP to the managed config's `external-controller` endpoint. On Windows,
+falls back to the legacy named pipe when TCP is unavailable.
 """
 
 from __future__ import annotations
@@ -29,31 +22,10 @@ class ControllerError(RuntimeError):
 
 
 class ControllerUnreachable(ControllerError):
-    """Transport failed entirely (controller down / pipe closed / TCP refused).
-
-    Distinct from a controller that *responds* with a non-200 status -- callers
-    use this to tell "Verge is temporarily gone" apart from "node is dead".
-    """
-
-
-def _verge_dirs() -> list[Path]:
-    """Candidate Clash Verge Rev data dirs per platform."""
-    home = Path.home()
-    name = "io.github.clash-verge-rev.clash-verge-rev"
-    if sys.platform == "win32":
-        base = os.getenv("APPDATA", str(home / "AppData" / "Roaming"))
-        return [Path(base) / name]
-    if sys.platform == "darwin":
-        return [home / "Library" / "Application Support" / name]
-    # linux
-    return [
-        home / ".local" / "share" / name,
-        home / ".config" / name,
-    ]
+    """Transport failed entirely (controller down / pipe closed / TCP refused)."""
 
 
 def _read_controller(cfg: Path) -> tuple[str | None, str]:
-    """Parse (external-controller, secret) out of a Clash/Mihomo config.yaml."""
     if not cfg.exists():
         return None, ""
     try:
@@ -71,17 +43,11 @@ def _read_controller(cfg: Path) -> tuple[str | None, str]:
 
 
 def _discover() -> tuple[str | None, str]:
-    """Return (controller 'host:port' or None, secret).
-
-    Priority: explicit env vars -> our own managed config (standalone mode) ->
-    an existing Clash Verge install (legacy / shared-core mode).
-    """
     env_ctrl = os.getenv("CLASH_CONTROLLER")
     env_secret = os.getenv("CLASH_SECRET")
     if env_ctrl:
         return env_ctrl, env_secret or ""
 
-    # Standalone: the config.yaml we generate and launch mihomo with.
     try:
         from .config import CONFIG_FILE
 
@@ -91,29 +57,13 @@ def _discover() -> tuple[str | None, str]:
     except Exception:  # noqa: BLE001
         pass
 
-    # Legacy: a running Clash Verge Rev we attach to.
-    controller, secret = None, ""
-    for d in _verge_dirs():
-        c, s = _read_controller(d / "config.yaml")
-        if c:
-            controller = c
-        if s:
-            secret = s
-        if controller:
-            break
-    return controller, secret or env_secret or "set-your-secret"
+    return None, env_secret or ""
 
 
 CONTROLLER, SECRET = _discover()
 
 
 def reconfigure() -> tuple[str | None, str]:
-    """Re-run discovery and refresh the module globals.
-
-    Used after standalone bring-up writes the managed config so subsequent
-    requests target the core we just launched (the values are otherwise frozen
-    at import time, before the config exists).
-    """
     global CONTROLLER, SECRET
     CONTROLLER, SECRET = _discover()
     return CONTROLLER, SECRET
@@ -144,7 +94,6 @@ def _parse(data: bytes) -> tuple[int, str]:
 
 
 def _via_tcp(raw: bytes, host: str, port: int) -> bytes:
-    # Raw socket bypasses any system HTTP proxy (Clash sets one!).
     with socket.create_connection((host, port), timeout=8) as s:
         s.sendall(raw)
         chunks = []
@@ -172,7 +121,6 @@ def _via_pipe(raw: bytes) -> bytes:
 def request(method: str, path: str, body: str | None = None, retries: int = 5) -> tuple[int, str]:
     raw = _build_raw(method, path, body)
 
-    # Build the transport preference list.
     transports = []
     if CONTROLLER and ":" in CONTROLLER:
         host, _, port = CONTROLLER.rpartition(":")

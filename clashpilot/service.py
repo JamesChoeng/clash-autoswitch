@@ -19,6 +19,7 @@ import sys
 from pathlib import Path
 
 from .daemon import PYTHON, _NO_WINDOW
+from . import config
 
 LABEL = "com.clashpilot"
 TASK_NAME = "clashpilot"
@@ -37,6 +38,14 @@ def _launchd_plist_path() -> Path:
 
 
 def _launchd_plist() -> str:
+    env_block = ""
+    if config.tun_enabled():
+        env_block = """
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>CLASHPILOT_TUN</key>
+        <string>1</string>
+    </dict>"""
     return f"""<?xml version="1.0" encoding="UTF-8"?>
 <plist version="1.0">
 <dict>
@@ -48,7 +57,7 @@ def _launchd_plist() -> str:
         <string>-m</string>
         <string>clashpilot</string>
         <string>up</string>
-    </array>
+    </array>{env_block}
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
@@ -70,7 +79,11 @@ def _install_macos() -> str:
     code, out = _run(["launchctl", "load", str(path)])
     if code != 0:
         return f"wrote {path} but `launchctl load` failed:\n{out}".rstrip()
-    return f"installed launchd agent: {path}\nstarts at login + restarts on crash."
+    routing = "TUN" if config.tun_enabled() else "system proxy"
+    return (
+        f"installed launchd agent: {path}\n"
+        f"starts at login + restarts on crash ({routing} routing)."
+    )
 
 
 def _uninstall_macos() -> str:
@@ -90,13 +103,16 @@ def _systemd_unit_path() -> Path:
 
 
 def _systemd_unit() -> str:
+    env_lines = ""
+    if config.tun_enabled():
+        env_lines = "Environment=CLASHPILOT_TUN=1\n"
     return f"""[Unit]
 Description=clashpilot (standalone fastest-node Clash client + failover)
 After=network-online.target
 
 [Service]
 Type=simple
-ExecStart={PYTHON} -m clashpilot up
+{env_lines}ExecStart={PYTHON} -m clashpilot up
 Restart=always
 RestartSec=5
 
@@ -116,7 +132,11 @@ def _install_linux() -> str:
             f"wrote {path} but `systemctl --user enable --now` failed:\n{out}\n"
             "If you're on a headless box, you may need: loginctl enable-linger $USER"
         ).rstrip()
-    return f"installed systemd --user unit: {path}\nstarts at login + restarts on crash."
+    routing = "TUN" if config.tun_enabled() else "system proxy"
+    return (
+        f"installed systemd --user unit: {path}\n"
+        f"starts at login + restarts on crash ({routing} routing)."
+    )
 
 
 def _uninstall_linux() -> str:
@@ -191,12 +211,29 @@ def _uninstall_windows() -> str:
 # --- Dispatch ----------------------------------------------------------------
 
 
-def install_service() -> str:
+def _service_routing_preamble(args) -> str | None:
+    """Apply TUN preference before writing the service unit. Returns an info line."""
+    if getattr(args, "tun", False):
+        config.set_tun_enabled(True)
+        return "routing: TUN (saved to settings)"
+    if getattr(args, "no_tun", False):
+        config.set_tun_enabled(False)
+        return "routing: system proxy (saved to settings)"
+    if sys.platform == "darwin" and config.ensure_macos_service_tun():
+        return "routing: enabled TUN for Cursor compatibility on macOS (saved to settings)"
+    return None
+
+
+def install_service(extra_note: str | None = None) -> str:
     if sys.platform == "darwin":
-        return _install_macos()
-    if sys.platform == "win32":
-        return _install_windows()
-    return _install_linux()
+        msg = _install_macos()
+    elif sys.platform == "win32":
+        msg = _install_windows()
+    else:
+        msg = _install_linux()
+    if extra_note:
+        msg = f"{extra_note}\n{msg}"
+    return msg
 
 
 def uninstall_service() -> str:

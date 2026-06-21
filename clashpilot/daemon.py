@@ -1,50 +1,35 @@
-"""clashpilot: scan nodes, pick best, daemon + standalone lifecycle.
+"""clashpilot daemon: process lifecycle + autoswitch main loop.
 
-Drives Mihomo via its external-controller (TCP on macOS/Linux/Windows, with a
-Windows named-pipe fallback -- see api). Targets Cursor + Anthropic by default.
-Process management (pid check / start / stop) is cross-platform.
-
-In standalone mode (bring_up/bring_down) clashpilot also downloads + supervises
-its own mihomo core and sets the system proxy; in legacy mode (run_daemon) it
-just attaches to a core someone else runs.
-
-Tunable knobs are read from CLASHPILOT_* environment variables at import time;
-sensible defaults preserve the original behavior when nothing is set.
-
-State (downloaded core, managed config, pid + log files) lives under a per-user
-directory, overridable with CLASHPILOT_STATE_DIR.
+Standalone mode downloads/supervises mihomo, configures routing, and runs the
+health/switch loop. Node selection lives in selector.py; probes in health.py.
 """
 
 from __future__ import annotations
 
-import concurrent.futures as cf
 import ctypes
 import json
 import os
-import re
 import signal
 import subprocess
 import sys
 import time
-import urllib.parse
-import urllib.request
-from datetime import datetime
 from pathlib import Path
 
-from . import api, config, core, opus_regions, sysproxy
+from . import api, config, core, sysproxy
 from .api import ControllerError, ControllerUnreachable, get_json, request
 from .config import STATE_DIR
+from .bench import bench_nodes
+from .env_config import ANTHROPIC_FAIL_THRESHOLD, FULL_SCAN_INTERVAL, HEALTH_FAIL_THRESHOLD, HEALTH_INTERVAL, SUB_REFRESH_INTERVAL, TARGETS
+from .health import health_fail_threshold, node_latency
+from .logutil import LOG_FILE, log, notify, set_console_notify, tail_log
+from .opus import maybe_refresh_opus_whitelist, refresh_opus_whitelist
+from .proxy_ctrl import current_node, current_node_chain, fetch_proxies, target_group
+from .selector import format_scan, pick_and_switch, switch_to
 
-LOG_FILE = STATE_DIR / "clashpilot.log"
 PID_FILE = STATE_DIR / "clashpilot.pid"
 
 
 def _python_exe() -> Path:
-    """Interpreter used to (re)spawn the background daemon.
-
-    Prefer pythonw.exe on Windows so the detached daemon never flashes a
-    console window; otherwise use the running interpreter.
-    """
     exe = Path(sys.executable)
     if sys.platform == "win32":
         pyw = exe.with_name("pythonw.exe")
@@ -56,83 +41,6 @@ def _python_exe() -> Path:
 PYTHON = _python_exe()
 
 
-# --- Configuration (env-overridable) ----------------------------------------
-
-
-def _env_str(name: str, default: str) -> str:
-    v = os.getenv(name)
-    return v if v not in (None, "") else default
-
-
-def _env_int(name: str, default: int) -> int:
-    try:
-        return int(os.getenv(name, ""))
-    except (TypeError, ValueError):
-        return default
-
-
-_DEFAULT_TARGETS = [
-    "https://api2.cursor.sh",
-    "https://api.anthropic.com/v1/messages",
-]
-TARGETS = [t.strip() for t in _env_str("CLASHPILOT_TARGETS", "").split(",") if t.strip()] or _DEFAULT_TARGETS
-CLAUDE_TARGET = _env_str(
-    "CLASHPILOT_CLAUDE_TARGET",
-    "https://api.anthropic.com/v1/messages",
-)
-
-# Latency probe (full scan / scoring) -- generous so slow-but-usable nodes rank.
-DELAY_TIMEOUT_MS = _env_int("CLASHPILOT_DELAY_TIMEOUT_MS", 4000)
-# Liveness probe (health loop) -- shorter; we only care "up or not", not how fast.
-HEALTH_TIMEOUT_MS = _env_int("CLASHPILOT_HEALTH_TIMEOUT_MS", 2500)
-# Which HTTP statuses count as a successful probe (Mihomo `expected` syntax:
-# `/`-separated ranges, `-` for a span). A healthy node reaching these API hosts
-# answers with a normal 2xx/4xx; the overload/gateway codes 429, 502, 503, 504
-# mean the proxy's upstream relay is rate-limiting or down, so we treat them as
-# failures instead of "reachable". (This is exactly the shared-relay 429 trap
-# that previously let a broken node keep its rank.) So: 200-599 minus 429/502-504.
-DELAY_EXPECTED = _env_str("CLASHPILOT_DELAY_EXPECTED", "200-428/430-501/505-599")
-# Anthropic probe is stricter still: also exclude the geo-block codes 403
-# ("unsupported region" / CloudFront) and 451, so the health loop detects a node
-# that drifted into a blocked region instead of trusting a permissive probe.
-# 200-599 minus 403/429/451/502-504.
-CLAUDE_EXPECTED = _env_str(
-    "CLASHPILOT_CLAUDE_EXPECTED", "200-402/404-428/430-450/452-501/505-599"
-)
-
-FULL_SCAN_INTERVAL = _env_int("CLASHPILOT_FULL_SCAN_INTERVAL", 180)
-HEALTH_INTERVAL = _env_int("CLASHPILOT_HEALTH_INTERVAL", 15)
-HEALTH_RETRIES = _env_int("CLASHPILOT_HEALTH_RETRIES", 3)
-HEALTH_FAIL_THRESHOLD = _env_int("CLASHPILOT_HEALTH_FAIL_THRESHOLD", 3)
-SWITCH_TOLERANCE_MS = _env_int("CLASHPILOT_SWITCH_TOLERANCE_MS", 150)
-MAX_WORKERS = _env_int("CLASHPILOT_MAX_WORKERS", 10)
-
-# Don't optimization-switch more often than this many seconds (failover bypasses
-# it). Prevents flapping between near-equal nodes across consecutive scans.
-SWITCH_COOLDOWN = _env_int("CLASHPILOT_SWITCH_COOLDOWN", 60)
-# How many consecutive scans we may defer an optimization switch because of an
-# in-flight Cursor/Anthropic connection before forcing it through.
-MAX_DEFER = _env_int("CLASHPILOT_MAX_DEFER", 5)
-# Rotate the log once it grows past this many bytes (single .1 backup kept).
-LOG_MAX_BYTES = _env_int("CLASHPILOT_LOG_MAX_BYTES", 1_000_000)
-# Standalone mode: re-fetch the subscription + reload the core this often (0=off).
-SUB_REFRESH_INTERVAL = _env_int("CLASHPILOT_SUB_REFRESH_INTERVAL", 21600)
-# After a node fails a real liveness check, bench it (and every sibling node that
-# shares the same upstream relay server) for this many seconds so autoswitch
-# rotates away from a rate-limited/dead relay instead of immediately re-picking
-# it. 0 disables benching.
-NODE_BENCH_SECONDS = _env_int("CLASHPILOT_NODE_BENCH_SECONDS", 600)
-
-INFO_KEYWORDS = ("流量", "剩余", "套餐", "到期", "expire", "重置", "官网", "订阅", "GB", "购买", "续费")
-GROUP_TYPES = {
-    "Selector", "URLTest", "Fallback", "LoadBalance", "Relay",
-    "Direct", "Reject", "RejectDrop", "Compatible", "Pass", "Dns",
-}
-
-
-# On Windows, any console child flashes a window unless we suppress it. Belt and
-# suspenders: CREATE_NO_WINDOW *and* a hidden STARTUPINFO, since on some setups
-# (GUI/pythonw parents, certain shells) the creation flag alone still flashes.
 def _win_no_window() -> dict:
     si = subprocess.STARTUPINFO()
     si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
@@ -143,581 +51,20 @@ def _win_no_window() -> dict:
 _NO_WINDOW = _win_no_window() if sys.platform == "win32" else {}
 _WIN_STILL_ACTIVE = 259
 
-# Cross-call state for hysteresis / anti-flap. Module-level because pick_and_switch
-# is otherwise stateless and may be invoked once-off or from the daemon loop.
-_LAST_SWITCH_TS = 0.0
-_DEFER_COUNT = 0
 
-# node -> epoch until which it is benched (skipped by selection). Populated when a
-# node fails a real liveness check; see bench_nodes / _benched.
-_BENCH_UNTIL: dict[str, float] = {}
-# Cache of node-name -> upstream relay server, parsed from the managed config and
-# rebuilt when the config file changes (subscription update). Lets one node's
-# failure bench every sibling sharing the same relay (e.g. cfyes.lxy1015.top).
-_NODE_SERVER_CACHE: tuple[float, dict[str, str]] = (0.0, {})
-
-
-def log(msg: str) -> None:
-    line = f"{datetime.now().strftime('%H:%M:%S')}  {msg}"
-    try:
-        # Rotate before writing so a single oversized line can't blow past the cap.
-        if LOG_MAX_BYTES > 0 and LOG_FILE.exists() and LOG_FILE.stat().st_size > LOG_MAX_BYTES:
-            LOG_FILE.replace(LOG_FILE.with_name(LOG_FILE.name + ".1"))
-    except OSError:
-        pass
-    try:
-        with LOG_FILE.open("a", encoding="utf-8") as fh:
-            fh.write(line + "\n")
-    except Exception:  # noqa: BLE001
-        pass
-
-
-# --- Failure benching (avoid rate-limited / dead relays) ---------------------
-
-
-def _flow_value(line: str, key: str) -> str | None:
-    """Pull a scalar value for `key` out of a Clash flow-style mapping line."""
-    m = re.search(rf"(?:^|[,{{]\s*){re.escape(key)}:\s*('[^']*'|\"[^\"]*\"|[^,}}]+)", line)
-    if not m:
-        return None
-    val = m.group(1).strip().strip("'\"").strip()
-    return val or None
-
-
-def _node_servers() -> dict[str, str]:
-    """Map each proxy node name to its upstream server host (best-effort).
-
-    Parsed from the managed config (which we generate as one flow-mapping per
-    proxy) and cached against the file mtime so it refreshes after a
-    subscription update. Returns {} if the config is missing/unparseable -- in
-    that case benching simply falls back to per-node instead of per-server.
-    """
-    global _NODE_SERVER_CACHE
-    try:
-        mtime = config.CONFIG_FILE.stat().st_mtime
-    except OSError:
-        return {}
-    if _NODE_SERVER_CACHE[0] == mtime and _NODE_SERVER_CACHE[1]:
-        return _NODE_SERVER_CACHE[1]
-    mapping: dict[str, str] = {}
-    try:
-        in_proxies = False
-        for raw in config.CONFIG_FILE.read_text(encoding="utf-8").splitlines():
-            stripped = raw.strip()
-            if re.match(r"^[A-Za-z0-9_.-]+:", raw) and not raw[:1].isspace():
-                in_proxies = raw.startswith("proxies:")
-                continue
-            if not in_proxies or not stripped.startswith("-"):
-                continue
-            name = _flow_value(stripped, "name")
-            server = _flow_value(stripped, "server")
-            if name and server:
-                mapping[name] = server
-    except OSError:
-        return {}
-    _NODE_SERVER_CACHE = (mtime, mapping)
-    return mapping
-
-
-def bench_nodes(node: str, reason: str = "") -> int:
-    """Bench `node` and every sibling sharing its relay server for NODE_BENCH_SECONDS.
-
-    Returns how many nodes were benched. No-op when benching is disabled.
-    """
-    if NODE_BENCH_SECONDS <= 0 or not node:
-        return 0
-    until = time.time() + NODE_BENCH_SECONDS
-    servers = _node_servers()
-    server = servers.get(node)
-    targets = {node}
-    if server:
-        targets |= {n for n, s in servers.items() if s == server}
-    for n in targets:
-        _BENCH_UNTIL[n] = until
-    where = f" (relay {server}, {len(targets)} nodes)" if server else ""
-    log(f"bench '{node}'{where} for {NODE_BENCH_SECONDS}s"
-        + (f": {reason}" if reason else ""))
-    return len(targets)
-
-
-def _benched(node: str) -> bool:
-    until = _BENCH_UNTIL.get(node)
-    if until is None:
-        return False
-    if time.time() >= until:
-        _BENCH_UNTIL.pop(node, None)
-        return False
-    return True
-
-
-def _drop_benched(nodes: list[str]) -> list[str]:
-    """Filter out currently-benched nodes, but never return empty if there were
-    candidates -- a total bench-out must not strand us with nothing to pick."""
-    active = [n for n in nodes if not _benched(n)]
-    return active if active else nodes
-
-
-# --- Controller reads --------------------------------------------------------
-
-
-def fetch_proxies() -> dict:
-    """One /proxies snapshot. Reuse across a decision to avoid redundant calls."""
-    return get_json("/proxies")["proxies"]
-
-
-def list_nodes(proxies: dict | None = None) -> list[str]:
-    data = proxies if proxies is not None else fetch_proxies()
-    out = []
-    for name, info in data.items():
-        if info.get("type") in GROUP_TYPES or "all" in info:
-            continue
-        if any(k in name for k in INFO_KEYWORDS):
-            continue
-        out.append(name)
-    return sorted(out)
-
-
-_GEO_IP_URL = _env_str("CLASHPILOT_GEO_IP_URL", "")  # empty => built-in probe chain
-_GEO_PROBE_DELAY_S = _env_int("CLASHPILOT_GEO_PROBE_DELAY_MS", 350) / 1000.0
-
-
-def _parse_exit_country(body: str, fmt: str) -> str | None:
-    if fmt == "plain":
-        code = body.strip().upper()
-        return code if len(code) == 2 and code.isalpha() else None
-    if fmt == "cf_trace":
-        for line in body.splitlines():
-            if line.startswith("loc="):
-                code = line.split("=", 1)[1].strip().upper()
-                return code if len(code) == 2 else None
-        return None
-    if fmt == "json":
-        try:
-            data = json.loads(body)
-            code = str(data.get("countryCode") or "").strip().upper()
-            return code if len(code) == 2 else None
-        except (ValueError, TypeError):
-            return None
-    return None
-
-
-def _geo_probe_chain() -> list[tuple[str, str]]:
-    if _GEO_IP_URL:
-        fmt = "json" if "json" in _GEO_IP_URL else "plain"
-        return [(_GEO_IP_URL, fmt)]
-    return [
-        ("https://1.1.1.1/cdn-cgi/trace", "cf_trace"),
-        ("http://ip-api.com/json/?fields=countryCode", "json"),
-        ("https://ipapi.co/country_code/", "plain"),
-    ]
-
-
-def reaches_claude(node: str, timeout_ms: int = DELAY_TIMEOUT_MS) -> bool:
-    """True if the node can reach the Anthropic API endpoint."""
-    return delay(node, CLAUDE_TARGET, timeout_ms) is not None
-
-
-def _name_likely_blocked(node: str) -> bool:
-    upper = node.upper()
-    return any(hint in node or hint in upper for hint in opus_regions.NAME_BLOCKLIST)
-
-
-def _proxy_opener(port: int) -> urllib.request.OpenerDirector:
-    proxy = f"http://127.0.0.1:{port}"
-    return urllib.request.build_opener(urllib.request.ProxyHandler({"http": proxy, "https": proxy}))
-
-
-def probe_exit_country(group: str, node: str, port: int) -> str | None:
-    """Switch the active group to `node`, read exit ISO country via the mixed port."""
-    if not set_node(group, node):
-        return None
-    time.sleep(0.15)
-    opener = _proxy_opener(port)
-    headers = {"User-Agent": "clashpilot"}
-    for url, fmt in _geo_probe_chain():
-        try:
-            req = urllib.request.Request(url, headers=headers)
-            with opener.open(req, timeout=12) as resp:
-                code = _parse_exit_country(resp.read().decode("utf-8", "replace"), fmt)
-                if code:
-                    return code
-        except Exception:  # noqa: BLE001
-            continue
-    return None
-
-
-def opus_eligible(node: str, country: str | None, regions: frozenset[str]) -> bool:
-    """True when exit country is Opus-supported and Anthropic is reachable."""
-    if not country or country not in regions:
-        return False
-    return reaches_claude(node)
-
-
-def refresh_opus_whitelist(nodes: list[str] | None = None) -> list[str]:
-    """Probe exit country + Anthropic reachability; keep Opus-region nodes only."""
-    nodes = nodes or list_nodes()
-    regions = config.opus_region_codes()
-    proxies = fetch_proxies()
-    group = target_group(proxies)
-    prev = (proxies.get(group) or {}).get("now")
-    port = config.mixed_port()
-    ok: list[str] = []
-    meta: dict[str, str] = {}
-    skipped = 0
-
-    log(f"opus whitelist scan: {len(nodes)} nodes | regions={len(regions)} iso codes")
-    try:
-        for i, node in enumerate(nodes, 1):
-            if _name_likely_blocked(node):
-                skipped += 1
-                continue
-            country = probe_exit_country(group, node, port)
-            if country and opus_eligible(node, country, regions):
-                ok.append(node)
-                meta[node] = country
-                log(f"  + {node} ({country})")
-            elif country:
-                log(f"  - {node} ({country} not Opus-eligible or Anthropic blocked)")
-            else:
-                log(f"  - {node} (geo probe failed)")
-            if _GEO_PROBE_DELAY_S > 0:
-                time.sleep(_GEO_PROBE_DELAY_S)
-            if i % 20 == 0:
-                log(f"  ... scanned {i}/{len(nodes)}")
-    finally:
-        if prev:
-            set_node(group, prev)
-
-    config.save_opus_whitelist(ok, meta)
-    log(
-        f"opus whitelist: {len(ok)}/{len(nodes)} nodes "
-        f"({skipped} skipped by name, {len(nodes) - skipped - len(ok)} rejected)"
-    )
-    return ok
-
-
-def eligible_nodes(proxies: dict | None = None) -> list[str]:
-    """Nodes considered for autoswitch -- filtered by the Opus whitelist when active."""
-    nodes = list_nodes(proxies)
-    wl = config.opus_whitelist()
-    if wl is None:
-        return nodes
-    wl_set = set(wl)
-    filtered = [n for n in nodes if n in wl_set]
-    if filtered:
-        return filtered
-    if nodes:
-        log("!! opus whitelist empty or stale -> rescanning")
-        return refresh_opus_whitelist(nodes)
-    return []
-
-
-def current_mode() -> str:
-    try:
-        return get_json("/configs").get("mode", "rule").lower()
-    except ControllerError:
-        return "rule"
-
-
-def target_group(proxies: dict | None = None) -> str:
-    if current_mode() == "global":
-        return "GLOBAL"
-    proxies = proxies if proxies is not None else fetch_proxies()
-    best, best_n = "GLOBAL", -1
-    for name, info in proxies.items():
-        if info.get("type") == "Selector" and name != "GLOBAL":
-            n = len(info.get("all", []))
-            if n > best_n:
-                best, best_n = name, n
-    return best
-
-
-def current_node(group: str | None = None, proxies: dict | None = None) -> str | None:
-    """Active node for `group`, or None if the group simply has no selection.
-
-    Raises ControllerUnreachable if the controller can't be reached -- callers
-    must treat that as "unknown", NOT as "node is dead".
-    """
-    if proxies is not None:
-        group = group or target_group(proxies)
-        return (proxies.get(group) or {}).get("now")
-    group = group or target_group()
-    try:
-        return get_json(f"/proxies/{urllib.parse.quote(group, safe='')}").get("now")
-    except ControllerUnreachable:
-        raise
-    except ControllerError:
-        return None
-
-
-def current_node_chain(group: str | None = None, proxies: dict | None = None) -> list[str]:
-    """Selection chain from the target group to the final proxy node."""
-    proxies = proxies if proxies is not None else fetch_proxies()
-    group = group or target_group(proxies)
-    node = (proxies.get(group) or {}).get("now")
-    chain = []
-    seen = set()
-    while node and node not in seen:
-        chain.append(node)
-        seen.add(node)
-        info = proxies.get(node) or {}
-        if info.get("type") not in GROUP_TYPES and "all" not in info:
-            break
-        node = info.get("now")
-    return chain
-
-
-def set_node(group: str, node: str) -> bool:
-    try:
-        status, _ = request(
-            "PUT",
-            f"/proxies/{urllib.parse.quote(group, safe='')}",
-            body=json.dumps({"name": node}),
-        )
-    except ControllerError:
-        return False
-    return status in (204, 200)
-
-
-def delay(node: str, url: str, timeout_ms: int = DELAY_TIMEOUT_MS, expected: str | None = None) -> int | None:
-    # Probes to the Anthropic target use the stricter status set by default so a
-    # geo-blocked 403/451 doesn't masquerade as a healthy node.
-    if expected is None:
-        expected = CLAUDE_EXPECTED if url == CLAUDE_TARGET else DELAY_EXPECTED
-    q = urllib.parse.urlencode({"url": url, "timeout": timeout_ms, "expected": expected})
-    path = f"/proxies/{urllib.parse.quote(node, safe='')}/delay?{q}"
-    try:
-        status, body = request("GET", path)
-        if status != 200:
-            return None
-        return int(json.loads(body).get("delay") or 0) or None
-    except Exception:  # noqa: BLE001
-        return None
-
-
-def node_latency(node: str, timeout_ms: int = DELAY_TIMEOUT_MS) -> dict:
-    """Probe the current node against all targets and summarize its latency."""
-    targets = TARGETS
-    with cf.ThreadPoolExecutor(max_workers=max(1, len(targets))) as pool:
-        delays = list(pool.map(lambda url: delay(node, url, timeout_ms), targets))
-    reachable = [d for d in delays if d is not None]
-    avg = int(sum(reachable) / len(reachable)) if reachable else None
-    return {
-        "average": avg,
-        "reachable": len(reachable),
-        "total": len(targets),
-        "targets": list(zip(targets, delays)),
-    }
-
-
-def is_alive(node: str) -> bool:
-    """Liveness check: probe targets in parallel; Claude must pass when whitelisted."""
-    targets = TARGETS
-    if config.opus_whitelist() is not None:
-        targets = [CLAUDE_TARGET]
-    for _ in range(HEALTH_RETRIES):
-        with cf.ThreadPoolExecutor(max_workers=max(1, len(targets))) as pool:
-            results = list(pool.map(lambda u: delay(node, u, HEALTH_TIMEOUT_MS), targets))
-        if all(r is not None for r in results):
-            return True
-    return False
-
-
-# Hosts whose in-flight connections we must not interrupt with an optional
-# (optimization) node switch. A failover off a *dead* node ignores this --
-# there's nothing alive to protect at that point.
-ACTIVE_HOSTS = ("cursor.sh", "cursor.com", "anthropic")
-
-
-def has_active_target_connection() -> bool:
-    """True if Mihomo reports a live connection to Cursor/Anthropic right now."""
-    try:
-        conns = get_json("/connections").get("connections") or []
-    except ControllerError:
-        return False
-    for c in conns:
-        meta = c.get("metadata") or {}
-        host = (meta.get("host") or meta.get("sniffHost") or "").lower()
-        if any(k in host for k in ACTIVE_HOSTS):
-            return True
-    return False
-
-
-def score(node: str) -> float | None:
-    results = [delay(node, u) for u in TARGETS]
-    vals = [r for r in results if r is not None]
-    if not vals:
-        return None
-    # When Claude whitelist filtering is on, Anthropic reachability is mandatory.
-    if config.opus_whitelist() is not None and CLAUDE_TARGET in TARGETS:
-        idx = TARGETS.index(CLAUDE_TARGET)
-        if results[idx] is None:
-            return None
-    penalty = (len(results) - len(vals)) * 600
-    return sum(vals) / len(vals) + penalty
-
-
-def rank_nodes(nodes: list[str] | None = None) -> list[tuple[str, float]]:
-    nodes = nodes or list_nodes()
-    scored: list[tuple[str, float]] = []
-    with cf.ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
-        for node, s in zip(nodes, pool.map(score, nodes)):
-            if s is not None:
-                scored.append((node, s))
-    scored.sort(key=lambda t: t[1])
-    return scored
-
-
-def _do_switch(group: str, node: str) -> bool:
-    global _LAST_SWITCH_TS, _DEFER_COUNT
-    if set_node(group, node):
-        _LAST_SWITCH_TS = time.time()
-        _DEFER_COUNT = 0
-        return True
-    return False
-
-
-def pick_and_switch(group: str | None = None, nodes: list[str] | None = None) -> dict:
-    """One scan + switch decision. Returns a summary dict.
-
-    Fetches a single /proxies snapshot and derives group / nodes / current node
-    from it to avoid redundant controller round-trips within one decision.
-    """
-    global _DEFER_COUNT
-    proxies = fetch_proxies()
-    group = group or target_group(proxies)
-    nodes = nodes or eligible_nodes(proxies)
-    # Rank only nodes that aren't currently benched for relay failures, so a
-    # rate-limited server isn't re-picked the moment its latency looks good.
-    candidates = _drop_benched(nodes)
-    cur = (proxies.get(group) or {}).get("now")
-
-    ranking = rank_nodes(candidates)
-    if not ranking:
-        log("!! no reachable node found this scan")
-        return {"action": "none", "reason": "no reachable nodes", "group": group}
-
-    best, best_score = ranking[0]
-    cur_score = next((s for n, s in ranking if n == cur), None)
-    top = ", ".join(f"{n.split('|')[0]}({int(s)})" for n, s in ranking[:3])
-    benched = len(nodes) - len(candidates)
-    log(f"scan: {len(ranking)}/{len(candidates)} ok"
-        + (f" ({benched} benched)" if benched else "") + f" | top: {top}")
-
-    if cur is None:
-        _do_switch(group, best)
-        log(f"no current node -> switch to '{best}' ({int(best_score)})")
-        return {"action": "switched", "from": None, "to": best, "score": int(best_score), "group": group}
-
-    if cur_score is None:
-        # When Opus-region filtering is on, the *current selection itself* must be
-        # an eligible (whitelisted, supported-region) leaf node. If it isn't --
-        # e.g. the group points at a nested url-test sub-group that can silently
-        # egress from a blocked region like HK -- a liveness check is misleading
-        # (Anthropic's 403 region-block still counts as "reachable"), so enforce
-        # the whitelist by switching to the best eligible node instead.
-        if config.opus_whitelist() is not None and cur not in nodes:
-            _do_switch(group, best)
-            log(f"enforce Opus whitelist: '{cur}' is not an eligible node -> switch to '{best}' ({int(best_score)})")
-            return {
-                "action": "switched", "from": cur, "to": best,
-                "score": int(best_score), "group": group,
-                "reason": "whitelist enforcement",
-            }
-        # A node we deliberately benched (relay rate-limited/dead) must not be
-        # kept by a fluke liveness re-check -- switch away unconditionally.
-        if _benched(cur):
-            _do_switch(group, best)
-            log(f"current '{cur}' is benched -> switch to '{best}' ({int(best_score)})")
-            return {"action": "switched", "from": cur, "to": best, "score": int(best_score),
-                    "group": group, "reason": "benched"}
-        # Didn't rank this scan: confirm with a dedicated liveness check before
-        # failing over, since a single slow scan shouldn't evict a live node.
-        if is_alive(cur):
-            log(f"keep '{cur}' (didn't rank this scan but still alive)")
-            return {"action": "kept", "node": cur, "best": best, "group": group}
-        bench_nodes(cur, "confirmed dead at scan")  # don't re-pick this relay
-        _do_switch(group, best)  # dead-node failover: bypasses cooldown
-        log(f"current '{cur}' confirmed dead -> switch to '{best}' ({int(best_score)})")
-        return {"action": "switched", "from": cur, "to": best, "score": int(best_score), "group": group}
-
-    if best != cur and best_score < cur_score - SWITCH_TOLERANCE_MS:
-        # Optimization switch (current node is alive, just slower). Subject to
-        # cooldown, defer-on-active-connection, and a defer cap.
-        since = time.time() - _LAST_SWITCH_TS
-        if since < SWITCH_COOLDOWN:
-            log(
-                f"hold '{cur}'({int(cur_score)}): better '{best}'({int(best_score)}) "
-                f"but within {SWITCH_COOLDOWN}s cooldown ({int(since)}s elapsed)"
-            )
-            return {
-                "action": "cooldown",
-                "node": cur,
-                "score": int(cur_score),
-                "best": best,
-                "best_score": int(best_score),
-                "group": group,
-            }
-        if has_active_target_connection() and _DEFER_COUNT < MAX_DEFER:
-            _DEFER_COUNT += 1
-            log(
-                f"defer switch '{cur}'({int(cur_score)}) -> '{best}'({int(best_score)}) "
-                f"({_DEFER_COUNT}/{MAX_DEFER}): active Cursor/Anthropic connection in flight"
-            )
-            return {
-                "action": "deferred",
-                "node": cur,
-                "score": int(cur_score),
-                "best": best,
-                "best_score": int(best_score),
-                "defer_count": _DEFER_COUNT,
-                "reason": "active connection",
-                "group": group,
-            }
-        forced = _DEFER_COUNT >= MAX_DEFER
-        _do_switch(group, best)
-        log(
-            f"switch '{cur}'({int(cur_score)}) -> '{best}'({int(best_score)})"
-            + (" (forced after max defers)" if forced else "")
-        )
-        return {
-            "action": "switched",
-            "from": cur,
-            "to": best,
-            "from_score": int(cur_score),
-            "to_score": int(best_score),
-            "forced": forced,
-            "group": group,
-        }
-
-    _DEFER_COUNT = 0
-    log(f"keep '{cur}' ({int(cur_score)}); best '{best}' ({int(best_score)}) within tolerance")
-    return {
-        "action": "kept",
-        "node": cur,
-        "score": int(cur_score),
-        "best": best,
-        "best_score": int(best_score),
-        "group": group,
-    }
-
-
-def format_scan(top_n: int = 10) -> str:
-    proxies = fetch_proxies()
-    nodes = eligible_nodes(proxies)
-    ranking = rank_nodes(nodes)
-    lines = [
-        f"mode={current_mode()} group={target_group(proxies)} current={current_node(proxies=proxies)}",
-        f"scanned {len(nodes)} nodes, {len(ranking)} reachable",
-        "",
-        f"{'SCORE':>6}  NODE",
-        "-" * 60,
-    ]
-    for name, s in ranking[:top_n]:
-        lines.append(f"{int(s):>6}  {name}")
-    if not ranking:
-        lines.append("(no reachable nodes)")
-    return "\n".join(lines)
+# --- Re-exports (stable public API for CLI/tests) --------------------------------
+
+from .health import anthropic_reachable, is_alive  # noqa: E402
+from .proxy_ctrl import (  # noqa: E402
+    current_mode,
+    delay,
+    list_nodes,
+    set_node,
+)
+from .selector import score  # noqa: E402
+
+# Backward-compatible alias for tests.
+_health_fail_threshold = health_fail_threshold
 
 
 def format_status() -> str:
@@ -725,6 +72,7 @@ def format_status() -> str:
         f"core_running={core.core_running()}\n"
         f"core_version={core.core_version() or 'n/a'}\n"
         f"subscription={'(default)' if config.using_default_subscription() else '(set)'}\n"
+        f"proxy_mode={config.proxy_mode()}\n"
         f"mixed_port={config.mixed_port()}\n"
     )
     try:
@@ -741,6 +89,7 @@ def format_status() -> str:
             f"daemon_running={daemon_pid() is not None}"
         )
     daemon = daemon_pid()
+    wl = config.opus_whitelist()
     return (
         f"mode={mode}\n"
         f"group={group}\n"
@@ -753,31 +102,14 @@ def format_status() -> str:
         f"daemon_pid={daemon or 'n/a'}\n"
         f"state_dir={STATE_DIR}\n"
         f"targets={TARGETS}\n"
-        f"opus_whitelist={'disabled' if config.opus_whitelist() is None else len(config.opus_whitelist() or [])}"
+        f"opus_whitelist={'disabled' if wl is None else len(wl)}"
     )
-
-
-def tail_log(lines: int = 15) -> str:
-    if not LOG_FILE.exists():
-        return "(no log yet)"
-    # Seek the tail instead of reading the whole (rotating) file into memory.
-    try:
-        with LOG_FILE.open("rb") as fh:
-            fh.seek(0, os.SEEK_END)
-            size = fh.tell()
-            fh.seek(max(0, size - 65536))
-            data = fh.read()
-    except OSError:
-        return "(log unreadable)"
-    text = data.decode("utf-8", "replace").splitlines()
-    return "\n".join(text[-lines:])
 
 
 # --- Process management ------------------------------------------------------
 
 
 def _proc_cmdline(pid: int) -> str:
-    """Best-effort command line of a pid, lowercased. Empty string if unknown."""
     try:
         proc = Path(f"/proc/{pid}/cmdline")
         if proc.exists():
@@ -834,22 +166,18 @@ def _pid_alive(pid: int) -> bool:
     if sys.platform == "win32":
         return _win_pid_alive(pid)
     try:
-        os.kill(pid, 0)  # signal 0 = existence check, doesn't kill
+        os.kill(pid, 0)
         return True
     except (OSError, ProcessLookupError):
         return False
 
 
 def _is_our_daemon(pid: int) -> bool:
-    """Guard against PID reuse: the live pid must actually be our daemon."""
     if not _pid_alive(pid):
         return False
     if sys.platform == "win32":
-        # Avoid spawning PowerShell/WMI just to read command lines; those helpers
-        # can briefly flash a console window.
         return True
     cmd = _proc_cmdline(pid)
-    # If we couldn't read the command line, fall back to existence (best effort).
     if not cmd:
         return True
     return "clashpilot" in cmd
@@ -881,47 +209,7 @@ def stop_daemon() -> str:
     return f"stopped (pid {pid})"
 
 
-def switch_to(node: str) -> str:
-    proxies = fetch_proxies()
-    group = target_group(proxies)
-    nodes = eligible_nodes(proxies)
-    if node not in nodes:
-        matches = [n for n in nodes if node in n]
-        if len(matches) == 1:
-            node = matches[0]
-        elif matches:
-            return f"ambiguous ({len(matches)} matches). Be more specific:\n" + "\n".join(matches[:5])
-        else:
-            return f"node not found: {node!r}"
-    if _do_switch(group, node):
-        log(f"manual switch -> '{node}'")
-        return f"switched {group} -> {node}"
-    return f"failed to switch to {node}"
-
-
-def run_daemon() -> None:
-    """Legacy controller-only loop: attach to a core/Verge someone else runs."""
-    if not _acquire_singleton():
-        return
-
-    def _cleanup(*_args) -> None:
-        PID_FILE.unlink(missing_ok=True)
-        sys.exit(0)
-
-    for sig in (signal.SIGTERM, signal.SIGINT):
-        try:
-            signal.signal(sig, _cleanup)
-        except (ValueError, OSError):
-            pass  # not on main thread / unsupported signal
-
-    try:
-        _run_loop()
-    finally:
-        PID_FILE.unlink(missing_ok=True)
-
-
 def _wait_controller(timeout: int = 20) -> bool:
-    """Poll the freshly-launched core's controller until it answers."""
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:
@@ -932,14 +220,39 @@ def _wait_controller(timeout: int = 20) -> bool:
     return False
 
 
-def bring_up() -> None:
-    """Standalone: download core, build config, launch core, set proxy, run.
+def _recover_core(group: str | None = None) -> bool:
+    if core.core_running():
+        return False
+    log("!! mihomo core not running -- restarting")
+    try:
+        core.start_core()
+        api.reconfigure()
+        if _wait_controller(20):
+            log("== core restarted; controller reachable")
+            if group:
+                pick_and_switch(group)
+            return True
+        log("!! core restarted but controller still unreachable -- check core log")
+    except Exception as e:  # noqa: BLE001
+        log(f"!! core restart failed: {type(e).__name__}: {e}")
+    return False
 
-    Blocks in the autoswitch loop; on any exit path the core is stopped and the
-    system proxy is restored.
-    """
+
+def _reload_core_config() -> bool:
+    try:
+        status, _ = request(
+            "PUT", "/configs?force=true",
+            body=json.dumps({"path": str(config.CONFIG_FILE)}),
+        )
+        return status in (204, 200)
+    except ControllerError:
+        return False
+
+
+def bring_up() -> bool:
     if not _acquire_singleton():
-        return
+        log("already running (another clashpilot up owns the pid file)")
+        return False
 
     def _cleanup(*_args) -> None:
         bring_down()
@@ -954,61 +267,59 @@ def bring_up() -> None:
 
     try:
         log("== standalone up: ensuring mihomo core")
+        config.ensure_opus_filtering()
         core.ensure_core()
         if config.using_default_subscription():
             log("== no user subscription set -- using built-in default "
                 "(set your own with: clashpilot set-sub <url>)")
-        config.ensure_config()
+        config.build_managed_config()
         api.reconfigure()
         pid = core.start_core()
         log(f"== core started (pid {pid}); version {core.core_version()}")
         if not _wait_controller(20):
             log("!! controller not reachable after start -- check core log")
-        if sysproxy.set_system_proxy("127.0.0.1", config.mixed_port()):
+        if config.tun_enabled():
+            log(f"== TUN mode enabled (stack={config.tun_stack()}) -- skipping system proxy")
+            if sys.platform == "darwin":
+                log("   macOS: TUN may require admin; grant network permission if prompted")
+        elif sysproxy.set_system_proxy("127.0.0.1", config.mixed_port()):
             log(f"== system proxy set -> 127.0.0.1:{config.mixed_port()}")
         else:
             log("!! could not set system proxy automatically (set it manually)")
         _run_loop(manage_subscription=True)
+        return True
     finally:
         bring_down()
         PID_FILE.unlink(missing_ok=True)
 
 
 def bring_down() -> None:
-    """Tear down standalone mode: remove the system proxy and stop the core."""
-    if sysproxy.unset_system_proxy():
-        log("== system proxy removed")
+    if not config.tun_enabled():
+        if sysproxy.unset_system_proxy():
+            log("== system proxy removed")
     if core.stop_core():
         log("== core stopped")
-
-
-def _reload_core_config() -> bool:
-    """Ask the running core to reload our managed config from disk."""
-    try:
-        status, _ = request(
-            "PUT", "/configs?force=true",
-            body=json.dumps({"path": str(config.CONFIG_FILE)}),
-        )
-        return status in (204, 200)
-    except ControllerError:
-        return False
 
 
 def _run_loop(manage_subscription: bool = False) -> None:
     group: str | None = None
     log(f"== clashpilot start | targets={TARGETS}")
     fails = 0
+    fail_threshold = HEALTH_FAIL_THRESHOLD
     last_full = time.time()
     last_sub = time.time()
 
-    # Immediate scan + switch at startup (mirrors original behavior), tolerant
-    # of a controller that isn't up yet.
     try:
         group = target_group()
         log(f"== mode group='{group}'")
-        if config.opus_whitelist() is not None:
-            refresh_opus_whitelist()
-        pick_and_switch(group)
+        maybe_refresh_opus_whitelist(force=False)
+        notify("probing nodes for best route...")
+        result = pick_and_switch(group)
+        node = result.get("to") or result.get("node")
+        if node:
+            notify(f"ready: autoswitch running on '{node}' (Ctrl-C to stop)")
+        else:
+            notify("ready: autoswitch running (Ctrl-C to stop)")
     except ControllerUnreachable:
         log("startup: controller unreachable -- will retry in loop")
         group = None
@@ -1042,39 +353,48 @@ def _run_loop(manage_subscription: bool = False) -> None:
             try:
                 cur = current_node(group)
             except ControllerUnreachable:
+                if _recover_core(group):
+                    fails = 0
+                    fail_threshold = HEALTH_FAIL_THRESHOLD
+                    continue
                 log("health: controller unreachable -- skipping round (not counted)")
                 continue
 
-            if cur is None or not is_alive(cur):
+            unhealthy, needed = health_fail_threshold(cur)
+            if unhealthy:
+                if needed != fail_threshold:
+                    fails = 0
+                    fail_threshold = needed
                 fails += 1
-                log(f"health: current '{cur}' unhealthy ({fails}/{HEALTH_FAIL_THRESHOLD})")
-                if fails >= HEALTH_FAIL_THRESHOLD:
-                    log("current node confirmed DOWN -> failover")
+                reason = "Anthropic unreachable" if needed == ANTHROPIC_FAIL_THRESHOLD else "unhealthy"
+                log(f"health: current '{cur}' {reason} ({fails}/{fail_threshold})")
+                if fails >= fail_threshold:
+                    log(f"current node confirmed DOWN ({reason}) -> failover")
                     if cur:
-                        # Bench the dead node + its relay siblings so the failover
-                        # scan rotates to a different upstream, not back to this one.
-                        bench_nodes(cur, "failed health loop")
+                        bench_nodes(cur, f"failed health loop ({reason})")
                     pick_and_switch(group)
                     fails = 0
+                    fail_threshold = HEALTH_FAIL_THRESHOLD
                     last_full = time.time()
             else:
                 if fails:
                     log(f"current '{cur}' recovered, reset fail counter")
                     fails = 0
+                    fail_threshold = HEALTH_FAIL_THRESHOLD
                 if time.time() - last_full >= FULL_SCAN_INTERVAL:
-                    if config.opus_whitelist() is not None:
-                        refresh_opus_whitelist()
+                    maybe_refresh_opus_whitelist(force=True)
                     pick_and_switch(group)
                     last_full = time.time()
         except ControllerUnreachable:
+            if _recover_core(group):
+                continue
             log("controller unreachable mid-iteration -- retrying next round")
-            group = None  # re-derive group once the controller is back
+            group = None
         except Exception as e:  # noqa: BLE001
             log(f"!! loop error: {type(e).__name__}: {e}")
 
 
 def _acquire_singleton() -> bool:
-    """Atomically claim the pid file; reclaim it only if the old pid is stale."""
     for _ in range(2):
         try:
             fd = os.open(str(PID_FILE), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
@@ -1085,6 +405,44 @@ def _acquire_singleton() -> bool:
             return True
         except FileExistsError:
             if daemon_pid() is not None:
-                return False  # a live daemon already owns it
-            PID_FILE.unlink(missing_ok=True)  # stale -> drop and retry once
+                return False
+            PID_FILE.unlink(missing_ok=True)
     return False
+
+
+__all__ = [
+    "ANTHROPIC_FAIL_THRESHOLD",
+    "ControllerError",
+    "ControllerUnreachable",
+    "HEALTH_FAIL_THRESHOLD",
+    "LOG_FILE",
+    "PID_FILE",
+    "PYTHON",
+    "TARGETS",
+    "_NO_WINDOW",
+    "_health_fail_threshold",
+    "anthropic_reachable",
+    "bring_down",
+    "bring_up",
+    "current_mode",
+    "current_node",
+    "current_node_chain",
+    "daemon_pid",
+    "delay",
+    "fetch_proxies",
+    "format_scan",
+    "format_status",
+    "is_alive",
+    "list_nodes",
+    "node_latency",
+    "notify",
+    "pick_and_switch",
+    "refresh_opus_whitelist",
+    "score",
+    "set_console_notify",
+    "set_node",
+    "stop_daemon",
+    "switch_to",
+    "tail_log",
+    "target_group",
+]

@@ -55,7 +55,7 @@ pip install git+https://github.com/JamesChoeng/clashpilot.git
 
 ## 快速开始
 
-启动（前台运行，`Ctrl-C` 停止）：
+启动（前台运行，`Ctrl-C` 停止；加 `-d` 可后台运行）：
 
 ```bash
 clashpilot up
@@ -68,10 +68,10 @@ clashpilot set-sub "你的订阅链接"
 clashpilot update
 ```
 
-只从 **Opus 可用地区**（Anthropic 官方支持的国家/地区）出口的节点里自动切换：
+只从 **Opus 可用地区**（Anthropic 官方支持的国家/地区）出口的节点里自动切换。**默认已开启**——首次 `clp up` 会自动扫描节点；也可手动刷新：
 
 ```bash
-clashpilot whitelist --refresh   # 探测每个节点的出口 IP 地区 + Anthropic 连通性
+clashpilot whitelist --refresh   # 手动重新探测出口 IP 地区 + Anthropic 连通性
 clashpilot up                    # autoswitch 只在白名单内选节点
 ```
 
@@ -87,6 +87,13 @@ clashpilot up                    # autoswitch 只在白名单内选节点
 clashpilot install-service
 ```
 
+macOS 上**首次** `install-service` 会自动启用 TUN 模式（Cursor 兼容性更好）；已配置过路由偏好的不会覆盖。也可显式指定：
+
+```bash
+clashpilot install-service --tun      # 强制 TUN
+clashpilot install-service --no-tun   # 强制系统代理
+```
+
 撤销：`clashpilot uninstall-service`。
 
 > macOS 使用 launchd、Linux 使用 systemd --user、Windows 优先使用登录计划任务；若计划任务被系统拒绝，会自动退回到无窗口 Startup 启动脚本。安装后立即启动，无需注销重登。
@@ -95,13 +102,47 @@ clashpilot install-service
 
 需要后台常驻时，使用 `clashpilot install-service` 注册登录自启服务；临时使用时运行 `clashpilot up`。
 
+### TUN 模式（全局接管）
+
+默认使用**系统代理**（HTTP + SOCKS，端口 7890）。部分应用不读系统代理，可改用 **TUN 模式**由 mihomo 在网卡层接管流量：
+
+```bash
+# 单次启用 TUN
+clashpilot up --tun
+
+# 写入设置，之后直接 clashpilot up 即走 TUN
+clashpilot up --tun --persist-tun
+
+# 或通过环境变量
+export CLASHPILOT_TUN=1
+clashpilot up
+```
+
+TUN 模式下**不再设置系统代理**；`clashpilot down` 停止内核后路由自动恢复。
+
+| 平台 | 说明 |
+|---|---|
+| macOS | 首次可能需输入管理员密码或允许网络扩展；默认 TUN 栈为 `gvisor` |
+| Linux | 需 `/dev/net/tun`；可选 `CLASHPILOT_TUN_AUTO_REDIRECT=1` 启用 TCP 重定向 |
+| Windows | 使用 Wintun；默认 TUN 栈为 `system` |
+
+相关环境变量：
+
+| 环境变量 | 默认值 | 说明 |
+|---|---|---|
+| `CLASHPILOT_TUN` | `0` | 设为 `1` 启用 TUN 模式 |
+| `CLASHPILOT_TUN_STACK` | macOS=`gvisor`，其他=`system` | TUN 栈：`system` / `gvisor` / `mixed` |
+| `CLASHPILOT_TUN_MTU` | macOS=`9000` | TUN MTU |
+| `CLASHPILOT_TUN_AUTO_REDIRECT` | `0` | Linux：启用 `auto-redirect` |
+
 ## 命令
 
 | 命令 | 说明 |
 |---|---|
-| `clashpilot up` | 启动：内核 + 系统代理 + 自动切换（前台运行，`Ctrl-C` 停止） |
+| `clashpilot up` | 启动：内核 + 路由 + 自动切换。前台运行（`Ctrl-C` 停止）；加 `-d` 后台运行 |
 | `clashpilot down` | 停止：关闭后台进程与内核并撤销系统代理 |
 | `clashpilot status` | 查看自动切换、内核、代理、订阅、当前节点与延迟等状态 |
+| `clashpilot scan` | 探测并排名节点延迟（不切换）；`-n 20` 显示前 20，`--all` 扫描全部节点 |
 | `clashpilot set-sub URL` | 保存订阅链接 |
 | `clashpilot update` | 重新拉取订阅并重建配置 |
 | `clashpilot whitelist` | 查看 Opus 地区节点白名单 |
@@ -123,7 +164,8 @@ clashpilot install-service
 | `CLASHPILOT_MIXED_PORT` | `7890` | 本地代理端口（HTTP + SOCKS） |
 | `CLASHPILOT_CONTROLLER_PORT` | `9090` | 内核控制端口 |
 | `CLASHPILOT_TARGETS` | Cursor + Anthropic | 测速目标地址（逗号分隔） |
-| `CLASHPILOT_OPUS_WHITELIST` | 自动 | 设为 `1` 强制启用白名单；`0` 关闭（兼容 `CLASHPILOT_CLAUDE_WHITELIST`） |
+| `CLASHPILOT_OPUS_WHITELIST` | 默认开启 | 设为 `0` 关闭 Opus 地区过滤；`1` 强制开启（兼容 `CLASHPILOT_CLAUDE_WHITELIST`） |
+| `CLASHPILOT_ANTHROPIC_FAIL_THRESHOLD` | `1` | Anthropic 探针连续失败多少次后切换节点（其他目标失败仍为 3 次） |
 | `CLASHPILOT_OPUS_REGIONS` | Anthropic 官方列表 | 覆盖 Opus 允许的 ISO 国家码，逗号分隔，如 `US,GB,JP,SG,TW` |
 | `CLASHPILOT_GEO_IP_URL` | ipapi.co | 探测节点出口 IP 的 GeoIP 接口 |
 | `CLASHPILOT_CLAUDE_TARGET` | Anthropic API | Anthropic 连通性探测地址 |
@@ -137,8 +179,8 @@ clashpilot install-service
 
 ## 说明与限制
 
-- 系统代理使用 mihomo 的本地端口（HTTP + SOCKS），未启用 TUN 模式。
-- Linux 上自动设置系统代理依赖 GNOME 的 `gsettings`；其他桌面环境请自行设置 `http_proxy` / `https_proxy`。
+- 默认使用 mihomo 本地端口（HTTP + SOCKS）作为**系统代理**；可选 **TUN 模式**全局接管（见上文）。
+- Linux 上自动设置系统代理依赖 GNOME 的 `gsettings`；其他桌面环境请自行设置 `http_proxy` / `https_proxy`，或改用 TUN 模式。
 
 ## 许可证
 
