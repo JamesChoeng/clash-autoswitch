@@ -26,10 +26,11 @@ import subprocess
 import sys
 import time
 import urllib.parse
+import urllib.request
 from datetime import datetime
 from pathlib import Path
 
-from . import api, config, core, sysproxy
+from . import api, config, core, opus_regions, sysproxy
 from .api import ControllerError, ControllerUnreachable, get_json, request
 from .config import STATE_DIR
 
@@ -74,6 +75,10 @@ _DEFAULT_TARGETS = [
     "https://api.anthropic.com/v1/messages",
 ]
 TARGETS = [t.strip() for t in _env_str("CLASHPILOT_TARGETS", "").split(",") if t.strip()] or _DEFAULT_TARGETS
+CLAUDE_TARGET = _env_str(
+    "CLASHPILOT_CLAUDE_TARGET",
+    "https://api.anthropic.com/v1/messages",
+)
 
 # Latency probe (full scan / scoring) -- generous so slow-but-usable nodes rank.
 DELAY_TIMEOUT_MS = _env_int("CLASHPILOT_DELAY_TIMEOUT_MS", 4000)
@@ -159,6 +164,146 @@ def list_nodes(proxies: dict | None = None) -> list[str]:
             continue
         out.append(name)
     return sorted(out)
+
+
+_GEO_IP_URL = _env_str("CLASHPILOT_GEO_IP_URL", "")  # empty => built-in probe chain
+_GEO_PROBE_DELAY_S = _env_int("CLASHPILOT_GEO_PROBE_DELAY_MS", 350) / 1000.0
+
+
+def _parse_exit_country(body: str, fmt: str) -> str | None:
+    if fmt == "plain":
+        code = body.strip().upper()
+        return code if len(code) == 2 and code.isalpha() else None
+    if fmt == "cf_trace":
+        for line in body.splitlines():
+            if line.startswith("loc="):
+                code = line.split("=", 1)[1].strip().upper()
+                return code if len(code) == 2 else None
+        return None
+    if fmt == "json":
+        try:
+            data = json.loads(body)
+            code = str(data.get("countryCode") or "").strip().upper()
+            return code if len(code) == 2 else None
+        except (ValueError, TypeError):
+            return None
+    return None
+
+
+def _geo_probe_chain() -> list[tuple[str, str]]:
+    if _GEO_IP_URL:
+        fmt = "json" if "json" in _GEO_IP_URL else "plain"
+        return [(_GEO_IP_URL, fmt)]
+    return [
+        ("https://1.1.1.1/cdn-cgi/trace", "cf_trace"),
+        ("http://ip-api.com/json/?fields=countryCode", "json"),
+        ("https://ipapi.co/country_code/", "plain"),
+    ]
+
+
+def reaches_claude(node: str, timeout_ms: int = DELAY_TIMEOUT_MS) -> bool:
+    """True if the node can reach the Anthropic API endpoint."""
+    return delay(node, CLAUDE_TARGET, timeout_ms) is not None
+
+
+def _name_likely_blocked(node: str) -> bool:
+    upper = node.upper()
+    return any(hint in node or hint in upper for hint in opus_regions.NAME_BLOCKLIST)
+
+
+def _proxy_opener(port: int) -> urllib.request.OpenerDirector:
+    proxy = f"http://127.0.0.1:{port}"
+    return urllib.request.build_opener(urllib.request.ProxyHandler({"http": proxy, "https": proxy}))
+
+
+def probe_exit_country(group: str, node: str, port: int) -> str | None:
+    """Switch the active group to `node`, read exit ISO country via the mixed port."""
+    if not set_node(group, node):
+        return None
+    time.sleep(0.15)
+    opener = _proxy_opener(port)
+    headers = {"User-Agent": "clashpilot"}
+    for url, fmt in _geo_probe_chain():
+        try:
+            req = urllib.request.Request(url, headers=headers)
+            with opener.open(req, timeout=12) as resp:
+                code = _parse_exit_country(resp.read().decode("utf-8", "replace"), fmt)
+                if code:
+                    return code
+        except Exception:  # noqa: BLE001
+            continue
+    return None
+
+
+def opus_eligible(node: str, country: str | None, regions: frozenset[str]) -> bool:
+    """True when exit country is Opus-supported and Anthropic is reachable."""
+    if not country or country not in regions:
+        return False
+    return reaches_claude(node)
+
+
+def refresh_opus_whitelist(nodes: list[str] | None = None) -> list[str]:
+    """Probe exit country + Anthropic reachability; keep Opus-region nodes only."""
+    nodes = nodes or list_nodes()
+    regions = config.opus_region_codes()
+    proxies = fetch_proxies()
+    group = target_group(proxies)
+    prev = (proxies.get(group) or {}).get("now")
+    port = config.mixed_port()
+    ok: list[str] = []
+    meta: dict[str, str] = {}
+    skipped = 0
+
+    log(f"opus whitelist scan: {len(nodes)} nodes | regions={len(regions)} iso codes")
+    try:
+        for i, node in enumerate(nodes, 1):
+            if _name_likely_blocked(node):
+                skipped += 1
+                continue
+            country = probe_exit_country(group, node, port)
+            if country and opus_eligible(node, country, regions):
+                ok.append(node)
+                meta[node] = country
+                log(f"  + {node} ({country})")
+            elif country:
+                log(f"  - {node} ({country} not Opus-eligible or Anthropic blocked)")
+            else:
+                log(f"  - {node} (geo probe failed)")
+            if _GEO_PROBE_DELAY_S > 0:
+                time.sleep(_GEO_PROBE_DELAY_S)
+            if i % 20 == 0:
+                log(f"  ... scanned {i}/{len(nodes)}")
+    finally:
+        if prev:
+            set_node(group, prev)
+
+    config.save_opus_whitelist(ok, meta)
+    log(
+        f"opus whitelist: {len(ok)}/{len(nodes)} nodes "
+        f"({skipped} skipped by name, {len(nodes) - skipped - len(ok)} rejected)"
+    )
+    return ok
+
+
+def refresh_claude_whitelist(nodes: list[str] | None = None) -> list[str]:
+    """Backward-compatible alias."""
+    return refresh_opus_whitelist(nodes)
+
+
+def eligible_nodes(proxies: dict | None = None) -> list[str]:
+    """Nodes considered for autoswitch -- filtered by the Opus whitelist when active."""
+    nodes = list_nodes(proxies)
+    wl = config.opus_whitelist()
+    if wl is None:
+        return nodes
+    wl_set = set(wl)
+    filtered = [n for n in nodes if n in wl_set]
+    if filtered:
+        return filtered
+    if nodes:
+        log("!! opus whitelist empty or stale -> rescanning")
+        return refresh_opus_whitelist(nodes)
+    return []
 
 
 def current_mode() -> str:
@@ -256,11 +401,14 @@ def node_latency(node: str, timeout_ms: int = DELAY_TIMEOUT_MS) -> dict:
 
 
 def is_alive(node: str) -> bool:
-    """Liveness check: probe all targets in parallel, success on first hit."""
+    """Liveness check: probe targets in parallel; Claude must pass when whitelisted."""
+    targets = TARGETS
+    if config.opus_whitelist() is not None:
+        targets = [CLAUDE_TARGET]
     for _ in range(HEALTH_RETRIES):
-        with cf.ThreadPoolExecutor(max_workers=max(1, len(TARGETS))) as pool:
-            results = list(pool.map(lambda u: delay(node, u, HEALTH_TIMEOUT_MS), TARGETS))
-        if any(r is not None for r in results):
+        with cf.ThreadPoolExecutor(max_workers=max(1, len(targets))) as pool:
+            results = list(pool.map(lambda u: delay(node, u, HEALTH_TIMEOUT_MS), targets))
+        if all(r is not None for r in results):
             return True
     return False
 
@@ -290,6 +438,11 @@ def score(node: str) -> float | None:
     vals = [r for r in results if r is not None]
     if not vals:
         return None
+    # When Claude whitelist filtering is on, Anthropic reachability is mandatory.
+    if config.opus_whitelist() is not None and CLAUDE_TARGET in TARGETS:
+        idx = TARGETS.index(CLAUDE_TARGET)
+        if results[idx] is None:
+            return None
     penalty = (len(results) - len(vals)) * 600
     return sum(vals) / len(vals) + penalty
 
@@ -323,7 +476,7 @@ def pick_and_switch(group: str | None = None, nodes: list[str] | None = None) ->
     global _DEFER_COUNT
     proxies = fetch_proxies()
     group = group or target_group(proxies)
-    nodes = nodes or list_nodes(proxies)
+    nodes = nodes or eligible_nodes(proxies)
     cur = (proxies.get(group) or {}).get("now")
 
     ranking = rank_nodes(nodes)
@@ -414,7 +567,7 @@ def pick_and_switch(group: str | None = None, nodes: list[str] | None = None) ->
 
 def format_scan(top_n: int = 10) -> str:
     proxies = fetch_proxies()
-    nodes = list_nodes(proxies)
+    nodes = eligible_nodes(proxies)
     ranking = rank_nodes(nodes)
     lines = [
         f"mode={current_mode()} group={target_group(proxies)} current={current_node(proxies=proxies)}",
@@ -462,7 +615,8 @@ def format_status() -> str:
         f"daemon_running={daemon is not None}\n"
         f"daemon_pid={daemon or 'n/a'}\n"
         f"state_dir={STATE_DIR}\n"
-        f"targets={TARGETS}"
+        f"targets={TARGETS}\n"
+        f"opus_whitelist={'disabled' if config.opus_whitelist() is None else len(config.opus_whitelist() or [])}"
     )
 
 
@@ -593,7 +747,7 @@ def stop_daemon() -> str:
 def switch_to(node: str) -> str:
     proxies = fetch_proxies()
     group = target_group(proxies)
-    nodes = list_nodes(proxies)
+    nodes = eligible_nodes(proxies)
     if node not in nodes:
         matches = [n for n in nodes if node in n]
         if len(matches) == 1:
@@ -715,6 +869,8 @@ def _run_loop(manage_subscription: bool = False) -> None:
     try:
         group = target_group()
         log(f"== mode group='{group}'")
+        if config.opus_whitelist() is not None:
+            refresh_opus_whitelist()
         pick_and_switch(group)
     except ControllerUnreachable:
         log("startup: controller unreachable -- will retry in loop")
@@ -735,6 +891,8 @@ def _run_loop(manage_subscription: bool = False) -> None:
                     config.update_subscription()
                     if _reload_core_config():
                         log("subscription refreshed + core reloaded")
+                        if config.opus_whitelist() is not None:
+                            refresh_opus_whitelist()
                     else:
                         log("subscription refreshed (core reload failed)")
                 except Exception as e:  # noqa: BLE001
@@ -763,6 +921,8 @@ def _run_loop(manage_subscription: bool = False) -> None:
                     log(f"current '{cur}' recovered, reset fail counter")
                     fails = 0
                 if time.time() - last_full >= FULL_SCAN_INTERVAL:
+                    if config.opus_whitelist() is not None:
+                        refresh_opus_whitelist()
                     pick_and_switch(group)
                     last_full = time.time()
         except ControllerUnreachable:

@@ -138,6 +138,9 @@ def _cmd_status(_args: argparse.Namespace) -> int:
             average = latency["average"]
             average_text = f"{average}ms avg" if average is not None else "timeout"
             out(f"  latency:      {average_text} ({latency['reachable']}/{latency['total']} targets)")
+        wl = config.opus_whitelist()
+        if wl is not None:
+            out(f"  opus wl:      {len(wl)} nodes (Opus-region pool)")
     except daemon.ControllerUnreachable as e:
         out(f"  node:         n/a (controller unreachable: {e})")
     except daemon.ControllerError as e:
@@ -178,8 +181,46 @@ def _cmd_setup_path(_args: argparse.Namespace) -> int:
 def _cmd_update(_args: argparse.Namespace) -> int:
     path = config.update_subscription()
     print(f"subscription refreshed; managed config rebuilt at {path}")
+    if config.opus_whitelist() is not None and core.core_running():
+        ok = daemon.refresh_opus_whitelist()
+        print(f"opus whitelist rescanned: {len(ok)} nodes")
     if core.core_running():
         print("note: restart the core to apply (clashpilot down && clashpilot up)")
+    return 0
+
+
+def _cmd_whitelist(args: argparse.Namespace) -> int:
+    if getattr(args, "refresh", False):
+        if not core.core_running():
+            print("error: core is not running -- start clashpilot first (clashpilot up)", file=sys.stderr)
+            return 1
+        ok = daemon.refresh_opus_whitelist()
+        meta = config.opus_whitelist_meta()
+        print(f"opus whitelist: {len(ok)} nodes saved -> {config.SETTINGS_FILE}")
+        print("  (exit country must be Anthropic-supported + Anthropic API reachable)")
+        for name in ok:
+            cc = meta.get(name, "?")
+            print(_console_safe(f"  + {name} [{cc}]"))
+        if not ok:
+            print("warning: no Opus-region nodes found; try other subscription nodes", file=sys.stderr)
+            return 1
+        return 0
+
+    wl = config.opus_whitelist()
+    meta = config.opus_whitelist_meta()
+    if wl is None:
+        saved = config.get_settings().get("opus_whitelist") or config.get_settings().get("claude_whitelist")
+        if isinstance(saved, list) and saved:
+            print(f"opus whitelist: {len(saved)} nodes saved but filtering disabled")
+            print("  enable: export CLASHPILOT_OPUS_WHITELIST=1")
+        else:
+            print("opus whitelist: not configured")
+            print("  scan nodes: clashpilot whitelist --refresh")
+        return 0
+    print(f"opus whitelist: {len(wl)} nodes (Opus-region filtering active)")
+    for name in wl:
+        cc = meta.get(name, "?")
+        print(_console_safe(f"  {name} [{cc}]"))
     return 0
 
 
@@ -205,6 +246,17 @@ def _build_parser() -> argparse.ArgumentParser:
     sp.set_defaults(func=_cmd_set_sub)
 
     sub.add_parser("update", help="Re-fetch the subscription and rebuild the config.").set_defaults(func=_cmd_update)
+
+    wl = sub.add_parser(
+        "whitelist",
+        help="Show or refresh the Opus-region node whitelist used by autoswitch.",
+    )
+    wl.add_argument(
+        "--refresh",
+        action="store_true",
+        help="probe exit country + Anthropic; keep Anthropic-supported regions only",
+    )
+    wl.set_defaults(func=_cmd_whitelist)
     sub.add_parser(
         "setup-path",
         help="Add the clashpilot/clp scripts dir to your user PATH (idempotent).",

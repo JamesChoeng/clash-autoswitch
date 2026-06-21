@@ -113,6 +113,70 @@ def set_subscription_url(url: str) -> None:
     save_settings(s)
 
 
+def _whitelist_env() -> str:
+    return (
+        os.getenv("CLASHPILOT_OPUS_WHITELIST")
+        or os.getenv("CLASHPILOT_CLAUDE_WHITELIST")
+        or ""
+    ).strip().lower()
+
+
+def opus_whitelist() -> list[str] | None:
+    """Return the Opus-region node whitelist when filtering is active.
+
+    Nodes must exit in Anthropic-supported countries (see opus_regions.py).
+    Filtering is on when CLASHPILOT_OPUS_WHITELIST=1, or when a non-empty
+    whitelist is saved after ``whitelist --refresh``. Set ...=0 to disable.
+    """
+    env = _whitelist_env()
+    if env in ("0", "false", "off", "no"):
+        return None
+    s = get_settings()
+    wl = s.get("opus_whitelist")
+    if not isinstance(wl, list):
+        wl = s.get("claude_whitelist")  # legacy key
+    if not isinstance(wl, list):
+        wl = []
+    if env in ("1", "true", "on", "yes") or wl:
+        return wl
+    return None
+
+
+def claude_whitelist() -> list[str] | None:
+    """Backward-compatible alias for :func:`opus_whitelist`."""
+    return opus_whitelist()
+
+
+def opus_whitelist_meta() -> dict[str, str]:
+    """Node -> ISO country code, populated by the last whitelist refresh."""
+    meta = get_settings().get("opus_whitelist_meta")
+    return meta if isinstance(meta, dict) else {}
+
+
+def opus_region_codes() -> frozenset[str]:
+    """ISO country codes treated as Opus-eligible; override via CLASHPILOT_OPUS_REGIONS."""
+    from .opus_regions import ANTHROPIC_SUPPORTED_REGIONS
+
+    raw = (os.getenv("CLASHPILOT_OPUS_REGIONS") or "").strip()
+    if not raw:
+        return ANTHROPIC_SUPPORTED_REGIONS
+    return frozenset(c.strip().upper() for c in raw.split(",") if c.strip())
+
+
+def save_opus_whitelist(nodes: list[str], meta: dict[str, str] | None = None) -> None:
+    s = get_settings()
+    s["opus_whitelist"] = nodes
+    if meta is not None:
+        s["opus_whitelist_meta"] = meta
+    # Drop legacy key so old anthropic-only lists are not reused.
+    s.pop("claude_whitelist", None)
+    save_settings(s)
+
+
+def save_claude_whitelist(nodes: list[str]) -> None:
+    save_opus_whitelist(nodes)
+
+
 def controller_port() -> int:
     try:
         return int(os.getenv("CLASHPILOT_CONTROLLER_PORT") or "")

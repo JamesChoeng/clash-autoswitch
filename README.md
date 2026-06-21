@@ -68,6 +68,15 @@ clashpilot set-sub "你的订阅链接"
 clashpilot update
 ```
 
+只从 **Opus 可用地区**（Anthropic 官方支持的国家/地区）出口的节点里自动切换：
+
+```bash
+clashpilot whitelist --refresh   # 探测每个节点的出口 IP 地区 + Anthropic 连通性
+clashpilot up                    # autoswitch 只在白名单内选节点
+```
+
+白名单会排除香港、大陆、俄罗斯等非 Anthropic 支持地区的出口，即使节点名称写着「美国/日本」也会以实际出口 IP 为准。
+
 > 所有命令均可使用短命令 `clp` 代替 `clashpilot`，例如 `clp up`。
 
 ## 后台常驻（开机自启）
@@ -95,6 +104,8 @@ clashpilot install-service
 | `clashpilot status` | 查看自动切换、内核、代理、订阅、当前节点与延迟等状态 |
 | `clashpilot set-sub URL` | 保存订阅链接 |
 | `clashpilot update` | 重新拉取订阅并重建配置 |
+| `clashpilot whitelist` | 查看 Opus 地区节点白名单 |
+| `clashpilot whitelist --refresh` | 扫描出口 IP 地区，保留 Anthropic 支持地区内的节点 |
 | `clashpilot install-service` | 注册开机自启的后台服务（崩溃自动重启） |
 | `clashpilot uninstall-service` | 移除开机自启的后台服务 |
 | `clashpilot setup-path` | 将命令所在目录加入 PATH |
@@ -111,6 +122,10 @@ clashpilot install-service
 | `CLASHPILOT_MIXED_PORT` | `7890` | 本地代理端口（HTTP + SOCKS） |
 | `CLASHPILOT_CONTROLLER_PORT` | `9090` | 内核控制端口 |
 | `CLASHPILOT_TARGETS` | Cursor + Anthropic | 测速目标地址（逗号分隔） |
+| `CLASHPILOT_OPUS_WHITELIST` | 自动 | 设为 `1` 强制启用白名单；`0` 关闭（兼容 `CLASHPILOT_CLAUDE_WHITELIST`） |
+| `CLASHPILOT_OPUS_REGIONS` | Anthropic 官方列表 | 覆盖 Opus 允许的 ISO 国家码，逗号分隔，如 `US,GB,JP,SG,TW` |
+| `CLASHPILOT_GEO_IP_URL` | ipapi.co | 探测节点出口 IP 的 GeoIP 接口 |
+| `CLASHPILOT_CLAUDE_TARGET` | Anthropic API | Anthropic 连通性探测地址 |
 | `CLASHPILOT_STATE_DIR` | 每用户状态目录 | 内核 / 配置 / 日志存放位置 |
 | `CLASH_CONTROLLER` / `CLASH_SECRET` | 自动 | 控制器地址 / 密钥 |
 
