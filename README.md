@@ -127,7 +127,9 @@ clashpilot install-service
 | `CLASHPILOT_OPUS_REGIONS` | Anthropic 官方列表 | 覆盖 Opus 允许的 ISO 国家码，逗号分隔，如 `US,GB,JP,SG,TW` |
 | `CLASHPILOT_GEO_IP_URL` | ipapi.co | 探测节点出口 IP 的 GeoIP 接口 |
 | `CLASHPILOT_CLAUDE_TARGET` | Anthropic API | Anthropic 连通性探测地址 |
-| `CLASHPILOT_CLAUDE_EXPECTED` | `200-402/404-450/452-599` | Anthropic 探测视为「可用」的 HTTP 状态范围；默认排除地区封锁的 `403`/`451`，以便健康检查能发现节点漂移到非受支持地区 |
+| `CLASHPILOT_DELAY_EXPECTED` | `200-428/430-501/505-599` | 通用测速视为「可用」的 HTTP 状态范围；默认排除 `429`/`502`/`503`/`504`，避免选中被限流或网关故障的中转节点 |
+| `CLASHPILOT_CLAUDE_EXPECTED` | `200-402/404-428/430-450/452-501/505-599` | Anthropic 探测可用状态范围；在通用基础上再排除地区封锁的 `403`/`451`，以便发现节点漂移到非受支持地区 |
+| `CLASHPILOT_NODE_BENCH_SECONDS` | `600` | 节点失败后将其及共用同一中转服务器的兄弟节点临时拉黑的秒数；`0` 关闭。避免反复选中正在限流的中转 |
 | `CLASHPILOT_STATE_DIR` | 每用户状态目录 | 内核 / 配置 / 日志存放位置 |
 | `CLASH_CONTROLLER` / `CLASH_SECRET` | 自动 | 控制器地址 / 密钥 |
 

@@ -21,6 +21,7 @@ import concurrent.futures as cf
 import ctypes
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -85,15 +86,19 @@ DELAY_TIMEOUT_MS = _env_int("CLASHPILOT_DELAY_TIMEOUT_MS", 4000)
 # Liveness probe (health loop) -- shorter; we only care "up or not", not how fast.
 HEALTH_TIMEOUT_MS = _env_int("CLASHPILOT_HEALTH_TIMEOUT_MS", 2500)
 # Which HTTP statuses count as a successful probe (Mihomo `expected` syntax:
-# `/`-separated ranges, `-` for a span). Any HTTP response means the node reached
-# the target, so the general probe is permissive.
-DELAY_EXPECTED = _env_str("CLASHPILOT_DELAY_EXPECTED", "200-599")
-# Anthropic probe is stricter: a reachable, non-blocked endpoint answers with a
-# normal status (e.g. 405 to an unauthenticated GET), while a geo-blocked exit
-# returns 403 ("unsupported region" / CloudFront) or 451. Excluding exactly those
-# two lets the health loop detect a node that drifted into a blocked region
-# instead of trusting a "200-599 = reachable" probe that a 403 would satisfy.
-CLAUDE_EXPECTED = _env_str("CLASHPILOT_CLAUDE_EXPECTED", "200-402/404-450/452-599")
+# `/`-separated ranges, `-` for a span). A healthy node reaching these API hosts
+# answers with a normal 2xx/4xx; the overload/gateway codes 429, 502, 503, 504
+# mean the proxy's upstream relay is rate-limiting or down, so we treat them as
+# failures instead of "reachable". (This is exactly the shared-relay 429 trap
+# that previously let a broken node keep its rank.) So: 200-599 minus 429/502-504.
+DELAY_EXPECTED = _env_str("CLASHPILOT_DELAY_EXPECTED", "200-428/430-501/505-599")
+# Anthropic probe is stricter still: also exclude the geo-block codes 403
+# ("unsupported region" / CloudFront) and 451, so the health loop detects a node
+# that drifted into a blocked region instead of trusting a permissive probe.
+# 200-599 minus 403/429/451/502-504.
+CLAUDE_EXPECTED = _env_str(
+    "CLASHPILOT_CLAUDE_EXPECTED", "200-402/404-428/430-450/452-501/505-599"
+)
 
 FULL_SCAN_INTERVAL = _env_int("CLASHPILOT_FULL_SCAN_INTERVAL", 180)
 HEALTH_INTERVAL = _env_int("CLASHPILOT_HEALTH_INTERVAL", 15)
@@ -112,6 +117,11 @@ MAX_DEFER = _env_int("CLASHPILOT_MAX_DEFER", 5)
 LOG_MAX_BYTES = _env_int("CLASHPILOT_LOG_MAX_BYTES", 1_000_000)
 # Standalone mode: re-fetch the subscription + reload the core this often (0=off).
 SUB_REFRESH_INTERVAL = _env_int("CLASHPILOT_SUB_REFRESH_INTERVAL", 21600)
+# After a node fails a real liveness check, bench it (and every sibling node that
+# shares the same upstream relay server) for this many seconds so autoswitch
+# rotates away from a rate-limited/dead relay instead of immediately re-picking
+# it. 0 disables benching.
+NODE_BENCH_SECONDS = _env_int("CLASHPILOT_NODE_BENCH_SECONDS", 600)
 
 INFO_KEYWORDS = ("流量", "剩余", "套餐", "到期", "expire", "重置", "官网", "订阅", "GB", "购买", "续费")
 GROUP_TYPES = {
@@ -138,6 +148,14 @@ _WIN_STILL_ACTIVE = 259
 _LAST_SWITCH_TS = 0.0
 _DEFER_COUNT = 0
 
+# node -> epoch until which it is benched (skipped by selection). Populated when a
+# node fails a real liveness check; see bench_nodes / _benched.
+_BENCH_UNTIL: dict[str, float] = {}
+# Cache of node-name -> upstream relay server, parsed from the managed config and
+# rebuilt when the config file changes (subscription update). Lets one node's
+# failure bench every sibling sharing the same relay (e.g. cfyes.lxy1015.top).
+_NODE_SERVER_CACHE: tuple[float, dict[str, str]] = (0.0, {})
+
 
 def log(msg: str) -> None:
     line = f"{datetime.now().strftime('%H:%M:%S')}  {msg}"
@@ -152,6 +170,91 @@ def log(msg: str) -> None:
             fh.write(line + "\n")
     except Exception:  # noqa: BLE001
         pass
+
+
+# --- Failure benching (avoid rate-limited / dead relays) ---------------------
+
+
+def _flow_value(line: str, key: str) -> str | None:
+    """Pull a scalar value for `key` out of a Clash flow-style mapping line."""
+    m = re.search(rf"(?:^|[,{{]\s*){re.escape(key)}:\s*('[^']*'|\"[^\"]*\"|[^,}}]+)", line)
+    if not m:
+        return None
+    val = m.group(1).strip().strip("'\"").strip()
+    return val or None
+
+
+def _node_servers() -> dict[str, str]:
+    """Map each proxy node name to its upstream server host (best-effort).
+
+    Parsed from the managed config (which we generate as one flow-mapping per
+    proxy) and cached against the file mtime so it refreshes after a
+    subscription update. Returns {} if the config is missing/unparseable -- in
+    that case benching simply falls back to per-node instead of per-server.
+    """
+    global _NODE_SERVER_CACHE
+    try:
+        mtime = config.CONFIG_FILE.stat().st_mtime
+    except OSError:
+        return {}
+    if _NODE_SERVER_CACHE[0] == mtime and _NODE_SERVER_CACHE[1]:
+        return _NODE_SERVER_CACHE[1]
+    mapping: dict[str, str] = {}
+    try:
+        in_proxies = False
+        for raw in config.CONFIG_FILE.read_text(encoding="utf-8").splitlines():
+            stripped = raw.strip()
+            if re.match(r"^[A-Za-z0-9_.-]+:", raw) and not raw[:1].isspace():
+                in_proxies = raw.startswith("proxies:")
+                continue
+            if not in_proxies or not stripped.startswith("-"):
+                continue
+            name = _flow_value(stripped, "name")
+            server = _flow_value(stripped, "server")
+            if name and server:
+                mapping[name] = server
+    except OSError:
+        return {}
+    _NODE_SERVER_CACHE = (mtime, mapping)
+    return mapping
+
+
+def bench_nodes(node: str, reason: str = "") -> int:
+    """Bench `node` and every sibling sharing its relay server for NODE_BENCH_SECONDS.
+
+    Returns how many nodes were benched. No-op when benching is disabled.
+    """
+    if NODE_BENCH_SECONDS <= 0 or not node:
+        return 0
+    until = time.time() + NODE_BENCH_SECONDS
+    servers = _node_servers()
+    server = servers.get(node)
+    targets = {node}
+    if server:
+        targets |= {n for n, s in servers.items() if s == server}
+    for n in targets:
+        _BENCH_UNTIL[n] = until
+    where = f" (relay {server}, {len(targets)} nodes)" if server else ""
+    log(f"bench '{node}'{where} for {NODE_BENCH_SECONDS}s"
+        + (f": {reason}" if reason else ""))
+    return len(targets)
+
+
+def _benched(node: str) -> bool:
+    until = _BENCH_UNTIL.get(node)
+    if until is None:
+        return False
+    if time.time() >= until:
+        _BENCH_UNTIL.pop(node, None)
+        return False
+    return True
+
+
+def _drop_benched(nodes: list[str]) -> list[str]:
+    """Filter out currently-benched nodes, but never return empty if there were
+    candidates -- a total bench-out must not strand us with nothing to pick."""
+    active = [n for n in nodes if not _benched(n)]
+    return active if active else nodes
 
 
 # --- Controller reads --------------------------------------------------------
@@ -484,9 +587,12 @@ def pick_and_switch(group: str | None = None, nodes: list[str] | None = None) ->
     proxies = fetch_proxies()
     group = group or target_group(proxies)
     nodes = nodes or eligible_nodes(proxies)
+    # Rank only nodes that aren't currently benched for relay failures, so a
+    # rate-limited server isn't re-picked the moment its latency looks good.
+    candidates = _drop_benched(nodes)
     cur = (proxies.get(group) or {}).get("now")
 
-    ranking = rank_nodes(nodes)
+    ranking = rank_nodes(candidates)
     if not ranking:
         log("!! no reachable node found this scan")
         return {"action": "none", "reason": "no reachable nodes", "group": group}
@@ -494,7 +600,9 @@ def pick_and_switch(group: str | None = None, nodes: list[str] | None = None) ->
     best, best_score = ranking[0]
     cur_score = next((s for n, s in ranking if n == cur), None)
     top = ", ".join(f"{n.split('|')[0]}({int(s)})" for n, s in ranking[:3])
-    log(f"scan: {len(ranking)}/{len(nodes)} ok | top: {top}")
+    benched = len(nodes) - len(candidates)
+    log(f"scan: {len(ranking)}/{len(candidates)} ok"
+        + (f" ({benched} benched)" if benched else "") + f" | top: {top}")
 
     if cur is None:
         _do_switch(group, best)
@@ -516,11 +624,19 @@ def pick_and_switch(group: str | None = None, nodes: list[str] | None = None) ->
                 "score": int(best_score), "group": group,
                 "reason": "whitelist enforcement",
             }
+        # A node we deliberately benched (relay rate-limited/dead) must not be
+        # kept by a fluke liveness re-check -- switch away unconditionally.
+        if _benched(cur):
+            _do_switch(group, best)
+            log(f"current '{cur}' is benched -> switch to '{best}' ({int(best_score)})")
+            return {"action": "switched", "from": cur, "to": best, "score": int(best_score),
+                    "group": group, "reason": "benched"}
         # Didn't rank this scan: confirm with a dedicated liveness check before
         # failing over, since a single slow scan shouldn't evict a live node.
         if is_alive(cur):
             log(f"keep '{cur}' (didn't rank this scan but still alive)")
             return {"action": "kept", "node": cur, "best": best, "group": group}
+        bench_nodes(cur, "confirmed dead at scan")  # don't re-pick this relay
         _do_switch(group, best)  # dead-node failover: bypasses cooldown
         log(f"current '{cur}' confirmed dead -> switch to '{best}' ({int(best_score)})")
         return {"action": "switched", "from": cur, "to": best, "score": int(best_score), "group": group}
@@ -934,6 +1050,10 @@ def _run_loop(manage_subscription: bool = False) -> None:
                 log(f"health: current '{cur}' unhealthy ({fails}/{HEALTH_FAIL_THRESHOLD})")
                 if fails >= HEALTH_FAIL_THRESHOLD:
                     log("current node confirmed DOWN -> failover")
+                    if cur:
+                        # Bench the dead node + its relay siblings so the failover
+                        # scan rotates to a different upstream, not back to this one.
+                        bench_nodes(cur, "failed health loop")
                     pick_and_switch(group)
                     fails = 0
                     last_full = time.time()
