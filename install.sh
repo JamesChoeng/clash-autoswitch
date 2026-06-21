@@ -107,14 +107,5 @@ fi
 step "Installing clashpilot from $REPO_URL"
 "$PY" -m pipx install --force "$REPO_URL"
 
-step "Registering Cursor startup hook"
-if have clashpilot; then
-    clashpilot install-cursor-hook || warn "could not register Cursor hook; run: clashpilot install-cursor-hook"
-elif [ -x "$HOME/.local/bin/clashpilot" ]; then
-    "$HOME/.local/bin/clashpilot" install-cursor-hook || warn "could not register Cursor hook; run: clashpilot install-cursor-hook"
-else
-    warn "could not find clashpilot on PATH yet; open a new shell and run: clashpilot install-cursor-hook"
-fi
-
 printf '\n'
-step "Done. Open Cursor to auto-start clashpilot, or run now:  clashpilot up"
+step "Done. Run now:  clashpilot up"

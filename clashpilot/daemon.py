@@ -555,7 +555,7 @@ def _is_our_daemon(pid: int) -> bool:
         return False
     if sys.platform == "win32":
         # Avoid spawning PowerShell/WMI just to read command lines; those helpers
-        # are the common source of visible console flashes during Cursor hooks.
+        # can briefly flash a console window.
         return True
     cmd = _proc_cmdline(pid)
     # If we couldn't read the command line, fall back to existence (best effort).
@@ -572,30 +572,6 @@ def daemon_pid() -> int | None:
         return pid if _is_our_daemon(pid) else None
     except Exception:  # noqa: BLE001
         return None
-
-
-def start_daemon() -> str:
-    existing = daemon_pid()
-    if existing:
-        return f"already running (pid {existing})"
-    kwargs: dict = {**_NO_WINDOW}
-    if sys.platform != "win32":
-        kwargs["start_new_session"] = True  # detach so it survives parent exit
-    # Detach stdio: the loop logs to LOG_FILE, and inheriting the caller's
-    # stdout (e.g. the `hook` process) would corrupt its `{}` output.
-    subprocess.Popen(
-        [str(PYTHON), "-m", "clashpilot", "up"],
-        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        **kwargs,
-    )
-    # Poll instead of a fixed sleep so we return as soon as the pid file lands.
-    deadline = time.time() + 5
-    while time.time() < deadline:
-        time.sleep(0.25)
-        pid = daemon_pid()
-        if pid:
-            return f"started (pid {pid})"
-    return f"start requested (check {LOG_FILE})"
 
 
 def stop_daemon() -> str:

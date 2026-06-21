@@ -1,9 +1,5 @@
 """clashpilot command-line interface.
 
-The `hook` subcommand is what the Cursor `sessionStart` hook invokes: it brings
-the whole stack up idempotently and prints `{}` so the hook stays valid. The
-other subcommands are for interactive use.
-
 Run as `clashpilot <cmd>` (installed console script) or `python -m clashpilot <cmd>`.
 """
 
@@ -20,7 +16,7 @@ from pathlib import Path
 # Mirror so first-time / refresh downloads survive GitHub being blocked in CN.
 os.environ.setdefault("CLASHPILOT_GH_PROXY", "https://ghfast.top")
 
-from . import __version__, config, core, cursorhook, daemon, pathsetup, service, sysproxy
+from . import __version__, config, core, daemon, pathsetup, service, sysproxy
 
 _GEO_BASE = "https://ghfast.top/https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/"
 _GEO_FILES = ("geoip.metadb", "geosite.dat")
@@ -76,23 +72,6 @@ def _prepare() -> None:
 
 
 # --- Subcommands -------------------------------------------------------------
-
-
-def _cmd_hook(_args: argparse.Namespace) -> int:
-    """Cursor sessionStart entrypoint: ensure a background daemon is running,
-    then print `{}` and return fast (downloads happen in the daemon)."""
-    try:
-        msg = daemon.start_daemon()
-        _log(f"hook: {msg}")
-    except Exception as e:  # noqa: BLE001
-        _log(f"error: {e}")
-    try:
-        if sys.stdout is not None:
-            sys.stdout.write("{}")
-            sys.stdout.flush()
-    except Exception:  # noqa: BLE001
-        pass
-    return 0
 
 
 def _cmd_up(_args: argparse.Namespace) -> int:
@@ -177,16 +156,6 @@ def _cmd_uninstall_service(_args: argparse.Namespace) -> int:
     return 0
 
 
-def _cmd_install_cursor_hook(_args: argparse.Namespace) -> int:
-    print(cursorhook.install_cursor_hook())
-    return 0
-
-
-def _cmd_uninstall_cursor_hook(_args: argparse.Namespace) -> int:
-    print(cursorhook.uninstall_cursor_hook())
-    return 0
-
-
 def _cmd_set_sub(args: argparse.Namespace) -> int:
     config.set_subscription_url(args.url)
     print(f"saved subscription URL -> {config.SETTINGS_FILE}")
@@ -227,15 +196,6 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--version", action="version", version=f"clashpilot {__version__}")
     sub = p.add_subparsers(dest="command", required=True)
 
-    sub.add_parser("hook", help="Cursor sessionStart entrypoint: ensure the background daemon is running.").set_defaults(func=_cmd_hook)
-    sub.add_parser(
-        "install-cursor-hook",
-        help="Register a Cursor sessionStart hook so opening Cursor starts clashpilot.",
-    ).set_defaults(func=_cmd_install_cursor_hook)
-    sub.add_parser(
-        "uninstall-cursor-hook",
-        help="Remove the Cursor sessionStart hook registered by clashpilot.",
-    ).set_defaults(func=_cmd_uninstall_cursor_hook)
     sub.add_parser("up", help="Core + system proxy + autoswitch in the foreground (Ctrl-C to stop).").set_defaults(func=_cmd_up)
     sub.add_parser("down", help="Stop the daemon/core and unset the system proxy.").set_defaults(func=_cmd_down)
     sub.add_parser("status", help="Show core / proxy / subscription status.").set_defaults(func=_cmd_status)

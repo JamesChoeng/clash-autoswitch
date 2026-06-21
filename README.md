@@ -24,7 +24,7 @@ macOS / Linux：
 curl -fsSL https://raw.githubusercontent.com/JamesChoeng/clashpilot/main/install.sh | sh
 ```
 
-安装脚本会自动注册 Cursor 启动钩子；之后打开 Cursor 会自动拉起 clashpilot。也可以**新开一个终端**手动运行 `clashpilot up`。
+安装完成后，**新开一个终端**运行 `clashpilot up` 即可启动。
 
 ### 已有 Python 环境
 
@@ -84,19 +84,7 @@ clashpilot install-service
 
 ## 让 Cursor 等 AI 工具保持在线
 
-一键安装脚本会自动注册 Cursor `sessionStart` 钩子；以后打开 Cursor 时会自动执行 `clashpilot hook`，并在后台静默拉起代理。
-
-如果你是手动安装，或需要修复钩子配置，运行：
-
-```bash
-clashpilot install-cursor-hook
-```
-
-撤销 Cursor 启动钩子：
-
-```bash
-clashpilot uninstall-cursor-hook
-```
+需要后台常驻时，使用 `clashpilot install-service` 注册登录自启服务；临时使用时运行 `clashpilot up`。
 
 ## 命令
 
@@ -107,12 +95,9 @@ clashpilot uninstall-cursor-hook
 | `clashpilot status` | 查看自动切换、内核、代理、订阅、当前节点与延迟等状态 |
 | `clashpilot set-sub URL` | 保存订阅链接 |
 | `clashpilot update` | 重新拉取订阅并重建配置 |
-| `clashpilot install-cursor-hook` | 注册 Cursor 启动钩子，打开 Cursor 时自动拉起 clashpilot |
-| `clashpilot uninstall-cursor-hook` | 移除 Cursor 启动钩子 |
 | `clashpilot install-service` | 注册开机自启的后台服务（崩溃自动重启） |
 | `clashpilot uninstall-service` | 移除开机自启的后台服务 |
 | `clashpilot setup-path` | 将命令所在目录加入 PATH |
-| `clashpilot hook` | 供 Cursor 钩子调用（确保后台守护进程在运行） |
 
 ## 配置
 

@@ -24,7 +24,7 @@ macOS / Linux:
 curl -fsSL https://raw.githubusercontent.com/JamesChoeng/clashpilot/main/install.sh | sh
 ```
 
-The installer registers a Cursor startup hook automatically; opening Cursor will start clashpilot. You can also open a **new terminal** and run `clashpilot up` manually.
+After installation, open a **new terminal** and run `clashpilot up` to start.
 
 ### If you already have Python
 
@@ -84,19 +84,7 @@ Remove it: `clashpilot uninstall-service`.
 
 ## Keep Cursor & other AI tools online
 
-The one-line installer automatically registers a Cursor `sessionStart` hook. After that, opening Cursor runs `clashpilot hook` and starts the proxy silently in the background.
-
-If you installed manually, or need to repair the hook config, run:
-
-```bash
-clashpilot install-cursor-hook
-```
-
-Remove the Cursor startup hook:
-
-```bash
-clashpilot uninstall-cursor-hook
-```
+Use `clashpilot install-service` to register a login-started background service, or run `clashpilot up` for a temporary foreground session.
 
 ## Commands
 
@@ -107,12 +95,9 @@ clashpilot uninstall-cursor-hook
 | `clashpilot status` | Show autoswitch / core / proxy / subscription / current node / latency status |
 | `clashpilot set-sub URL` | Save your subscription link |
 | `clashpilot update` | Re-fetch the subscription and rebuild the config |
-| `clashpilot install-cursor-hook` | Register the Cursor startup hook so opening Cursor starts clashpilot |
-| `clashpilot uninstall-cursor-hook` | Remove the Cursor startup hook |
 | `clashpilot install-service` | Register a login-launched background service (restarts on crash) |
 | `clashpilot uninstall-service` | Remove the login-launched background service |
 | `clashpilot setup-path` | Add the command's directory to PATH |
-| `clashpilot hook` | For the Cursor hook (ensures the background daemon is running) |
 
 ## Configuration
 
