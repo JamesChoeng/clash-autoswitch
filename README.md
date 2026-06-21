@@ -117,7 +117,8 @@ clashpilot install-service
 | 环境变量 | 默认值 | 说明 |
 |---|---|---|
 | `CLASHPILOT_SUBSCRIPTION` | 内置默认 | 订阅链接（优先级高于 `set-sub`） |
-| `CLASHPILOT_GH_PROXY` | 无 | GitHub 下载镜像前缀，如 `https://ghproxy.com` |
+| `CLASHPILOT_GH_PROXY` | 无 | GitHub 下载镜像前缀，如 `https://ghproxy.com`；设置后优先走镜像，直连作为兜底。默认（未设置时）先直连 GitHub，失败再自动回退到内置镜像 |
+| `CLASHPILOT_REQUIRE_CHECKSUM` | `0` | 设为 `1` 时，若无法从 GitHub API 获取内核 SHA-256 校验值则拒绝运行（默认无法获取时仅告警并继续） |
 | `CLASHPILOT_CORE_VERSION` | latest | 锁定 mihomo 版本，如 `v1.19.24` |
 | `CLASHPILOT_MIXED_PORT` | `7890` | 本地代理端口（HTTP + SOCKS） |
 | `CLASHPILOT_CONTROLLER_PORT` | `9090` | 内核控制端口 |
@@ -126,6 +127,7 @@ clashpilot install-service
 | `CLASHPILOT_OPUS_REGIONS` | Anthropic 官方列表 | 覆盖 Opus 允许的 ISO 国家码，逗号分隔，如 `US,GB,JP,SG,TW` |
 | `CLASHPILOT_GEO_IP_URL` | ipapi.co | 探测节点出口 IP 的 GeoIP 接口 |
 | `CLASHPILOT_CLAUDE_TARGET` | Anthropic API | Anthropic 连通性探测地址 |
+| `CLASHPILOT_CLAUDE_EXPECTED` | `200-402/404-450/452-599` | Anthropic 探测视为「可用」的 HTTP 状态范围；默认排除地区封锁的 `403`/`451`，以便健康检查能发现节点漂移到非受支持地区 |
 | `CLASHPILOT_STATE_DIR` | 每用户状态目录 | 内核 / 配置 / 日志存放位置 |
 | `CLASH_CONTROLLER` / `CLASH_SECRET` | 自动 | 控制器地址 / 密钥 |
 

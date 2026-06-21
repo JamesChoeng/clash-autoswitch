@@ -35,6 +35,6 @@ NAME_BLOCKLIST = (
     "伊朗", "IRAN", "🇮🇷",
     "朝鲜", "KOREA-N", "🇰🇵",
     "古巴", "CUBA", "🇨🇺",
-    "叙利亚", "SYRIA", "🇾🇪",
+    "叙利亚", "SYRIA", "🇸🇾",
     "克里米亚", "CRIMEA",
 )

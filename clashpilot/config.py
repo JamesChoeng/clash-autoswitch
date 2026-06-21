@@ -50,7 +50,6 @@ CONFIG_FILE = MANAGED_DIR / "config.yaml"
 SUBSCRIPTION_FILE = MANAGED_DIR / "subscription.yaml"
 
 DEFAULT_MIXED_PORT = 7890
-DEFAULT_CURSOR_PORT = 7897
 DEFAULT_CONTROLLER_PORT = 9090
 # mihomo logs every matched connection at info, which floods the core log. Default
 # to warning so the file stays small; override with CLASHPILOT_CORE_LOG_LEVEL.
@@ -142,11 +141,6 @@ def opus_whitelist() -> list[str] | None:
     return None
 
 
-def claude_whitelist() -> list[str] | None:
-    """Backward-compatible alias for :func:`opus_whitelist`."""
-    return opus_whitelist()
-
-
 def opus_whitelist_meta() -> dict[str, str]:
     """Node -> ISO country code, populated by the last whitelist refresh."""
     meta = get_settings().get("opus_whitelist_meta")
@@ -171,10 +165,6 @@ def save_opus_whitelist(nodes: list[str], meta: dict[str, str] | None = None) ->
     # Drop legacy key so old anthropic-only lists are not reused.
     s.pop("claude_whitelist", None)
     save_settings(s)
-
-
-def save_claude_whitelist(nodes: list[str]) -> None:
-    save_opus_whitelist(nodes)
 
 
 def controller_port() -> int:
@@ -314,7 +304,9 @@ def build_managed_config(subscription_text: str | None = None) -> Path:
         "mode: rule\n"
         f"log-level: {core_log_level()}\n"
         f"external-controller: 127.0.0.1:{controller_port()}\n"
-        f'secret: "{get_secret()}"\n'
+        # json.dumps yields a safely-quoted scalar so a CLASH_SECRET containing
+        # quotes/spaces can't break the generated YAML.
+        f"secret: {json.dumps(get_secret())}\n"
     )
     MANAGED_DIR.mkdir(parents=True, exist_ok=True)
     CONFIG_FILE.write_text(header + "\n" + base + "\n", encoding="utf-8")

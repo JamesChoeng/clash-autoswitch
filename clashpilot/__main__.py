@@ -8,17 +8,14 @@ from __future__ import annotations
 import argparse
 import datetime
 import os
-import shutil
 import sys
-import urllib.request
 from pathlib import Path
 
-# Mirror so first-time / refresh downloads survive GitHub being blocked in CN.
-os.environ.setdefault("CLASHPILOT_GH_PROXY", "https://ghfast.top")
+from . import __version__, api, config, core, daemon, pathsetup, service, sysproxy
 
-from . import __version__, config, core, daemon, pathsetup, service, sysproxy
-
-_GEO_BASE = "https://ghfast.top/https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/"
+# Direct GitHub by default; core.download_github falls back to a mirror when the
+# direct fetch fails (or honors CLASHPILOT_GH_PROXY if the user set one).
+_GEO_BASE = "https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/"
 _GEO_FILES = ("geoip.metadb", "geosite.dat")
 
 
@@ -32,16 +29,13 @@ def _log(msg: str) -> None:
 
 def _ensure_geo() -> None:
     """mihomo refuses to start without the geo DBs the generated rules reference."""
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     config.MANAGED_DIR.mkdir(parents=True, exist_ok=True)
     for fn in _GEO_FILES:
         dest = config.MANAGED_DIR / fn
         if dest.exists() and dest.stat().st_size > 0:
             continue
         try:
-            req = urllib.request.Request(_GEO_BASE + fn, headers={"User-Agent": "clashpilot"})
-            with opener.open(req, timeout=120) as r, open(dest, "wb") as f:
-                shutil.copyfileobj(r, f)
+            core.download_github(_GEO_BASE + fn, dest, timeout=120)
             _log(f"downloaded {fn} ({dest.stat().st_size} bytes)")
         except Exception as e:  # noqa: BLE001
             _log(f"geo {fn} download failed: {e}")
@@ -107,6 +101,9 @@ def _console_safe(line: str) -> str:
 
 
 def _cmd_status(_args: argparse.Namespace) -> int:
+    # Controller host/secret are discovered at import; re-run discovery so we pick
+    # up a managed config written after this process started.
+    api.reconfigure()
     daemon_pid = daemon.daemon_pid()
 
     def out(line: str) -> None:
@@ -179,6 +176,7 @@ def _cmd_setup_path(_args: argparse.Namespace) -> int:
 
 
 def _cmd_update(_args: argparse.Namespace) -> int:
+    api.reconfigure()
     path = config.update_subscription()
     print(f"subscription refreshed; managed config rebuilt at {path}")
     if config.opus_whitelist() is not None and core.core_running():
@@ -190,6 +188,7 @@ def _cmd_update(_args: argparse.Namespace) -> int:
 
 
 def _cmd_whitelist(args: argparse.Namespace) -> int:
+    api.reconfigure()
     if getattr(args, "refresh", False):
         if not core.core_running():
             print("error: core is not running -- start clashpilot first (clashpilot up)", file=sys.stderr)

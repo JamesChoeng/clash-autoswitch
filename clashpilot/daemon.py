@@ -84,8 +84,16 @@ CLAUDE_TARGET = _env_str(
 DELAY_TIMEOUT_MS = _env_int("CLASHPILOT_DELAY_TIMEOUT_MS", 4000)
 # Liveness probe (health loop) -- shorter; we only care "up or not", not how fast.
 HEALTH_TIMEOUT_MS = _env_int("CLASHPILOT_HEALTH_TIMEOUT_MS", 2500)
-# Which HTTP statuses count as a successful probe (Mihomo `expected` syntax).
+# Which HTTP statuses count as a successful probe (Mihomo `expected` syntax:
+# `/`-separated ranges, `-` for a span). Any HTTP response means the node reached
+# the target, so the general probe is permissive.
 DELAY_EXPECTED = _env_str("CLASHPILOT_DELAY_EXPECTED", "200-599")
+# Anthropic probe is stricter: a reachable, non-blocked endpoint answers with a
+# normal status (e.g. 405 to an unauthenticated GET), while a geo-blocked exit
+# returns 403 ("unsupported region" / CloudFront) or 451. Excluding exactly those
+# two lets the health loop detect a node that drifted into a blocked region
+# instead of trusting a "200-599 = reachable" probe that a 403 would satisfy.
+CLAUDE_EXPECTED = _env_str("CLASHPILOT_CLAUDE_EXPECTED", "200-402/404-450/452-599")
 
 FULL_SCAN_INTERVAL = _env_int("CLASHPILOT_FULL_SCAN_INTERVAL", 180)
 HEALTH_INTERVAL = _env_int("CLASHPILOT_HEALTH_INTERVAL", 15)
@@ -285,11 +293,6 @@ def refresh_opus_whitelist(nodes: list[str] | None = None) -> list[str]:
     return ok
 
 
-def refresh_claude_whitelist(nodes: list[str] | None = None) -> list[str]:
-    """Backward-compatible alias."""
-    return refresh_opus_whitelist(nodes)
-
-
 def eligible_nodes(proxies: dict | None = None) -> list[str]:
     """Nodes considered for autoswitch -- filtered by the Opus whitelist when active."""
     nodes = list_nodes(proxies)
@@ -373,8 +376,12 @@ def set_node(group: str, node: str) -> bool:
     return status in (204, 200)
 
 
-def delay(node: str, url: str, timeout_ms: int = DELAY_TIMEOUT_MS) -> int | None:
-    q = urllib.parse.urlencode({"url": url, "timeout": timeout_ms, "expected": DELAY_EXPECTED})
+def delay(node: str, url: str, timeout_ms: int = DELAY_TIMEOUT_MS, expected: str | None = None) -> int | None:
+    # Probes to the Anthropic target use the stricter status set by default so a
+    # geo-blocked 403/451 doesn't masquerade as a healthy node.
+    if expected is None:
+        expected = CLAUDE_EXPECTED if url == CLAUDE_TARGET else DELAY_EXPECTED
+    q = urllib.parse.urlencode({"url": url, "timeout": timeout_ms, "expected": expected})
     path = f"/proxies/{urllib.parse.quote(node, safe='')}/delay?{q}"
     try:
         status, body = request("GET", path)
@@ -495,6 +502,20 @@ def pick_and_switch(group: str | None = None, nodes: list[str] | None = None) ->
         return {"action": "switched", "from": None, "to": best, "score": int(best_score), "group": group}
 
     if cur_score is None:
+        # When Opus-region filtering is on, the *current selection itself* must be
+        # an eligible (whitelisted, supported-region) leaf node. If it isn't --
+        # e.g. the group points at a nested url-test sub-group that can silently
+        # egress from a blocked region like HK -- a liveness check is misleading
+        # (Anthropic's 403 region-block still counts as "reachable"), so enforce
+        # the whitelist by switching to the best eligible node instead.
+        if config.opus_whitelist() is not None and cur not in nodes:
+            _do_switch(group, best)
+            log(f"enforce Opus whitelist: '{cur}' is not an eligible node -> switch to '{best}' ({int(best_score)})")
+            return {
+                "action": "switched", "from": cur, "to": best,
+                "score": int(best_score), "group": group,
+                "reason": "whitelist enforcement",
+            }
         # Didn't rank this scan: confirm with a dedicated liveness check before
         # failing over, since a single slow scan shouldn't evict a live node.
         if is_alive(cur):

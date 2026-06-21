@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import gzip
 import ctypes
+import hashlib
 import json
 import os
 import platform
@@ -27,6 +28,13 @@ from pathlib import Path
 from .config import CONFIG_FILE, CORE_DIR, MANAGED_DIR
 
 GITHUB_REPO = "MetaCubeX/mihomo"
+
+# Fallback download mirror, used ONLY when a direct github.com fetch fails (helps
+# users where github.com is blocked). We never route through a third party by
+# default when the direct connection works; binary integrity is verified against
+# the GitHub API regardless of which URL actually served the bytes. Override or
+# force-prefer a mirror with CLASHPILOT_GH_PROXY.
+_DEFAULT_GH_FALLBACK = "https://ghfast.top"
 
 # On Windows, the mihomo console child flashes a window unless suppressed. Belt
 # and suspenders: CREATE_NO_WINDOW *and* a hidden STARTUPINFO, since the creation
@@ -134,20 +142,106 @@ def _latest_version() -> str:
     raise CoreError("could not determine latest mihomo version; set CLASHPILOT_CORE_VERSION")
 
 
-def _download_url(version: str, asset: str) -> str:
-    base = f"https://github.com/{GITHUB_REPO}/releases/download/{version}/{asset}"
-    proxy = (os.getenv("CLASHPILOT_GH_PROXY") or "").strip().rstrip("/")
-    # e.g. CLASHPILOT_GH_PROXY=https://ghproxy.com -> https://ghproxy.com/https://github.com/...
-    return f"{proxy}/{base}" if proxy else base
+def _download_candidates(github_url: str) -> list[str]:
+    """Ordered URLs to try for a github.com asset.
+
+    Default: direct GitHub first, then the built-in fallback mirror. When the
+    user explicitly sets CLASHPILOT_GH_PROXY they've opted into a mirror (likely
+    because direct access is blocked), so try it first and fall back to direct.
+    """
+    env = (os.getenv("CLASHPILOT_GH_PROXY") or "").strip().rstrip("/")
+    if env:
+        # e.g. CLASHPILOT_GH_PROXY=https://ghproxy.com -> https://ghproxy.com/https://github.com/...
+        return [f"{env}/{github_url}", github_url]
+    return [github_url, f"{_DEFAULT_GH_FALLBACK}/{github_url}"]
 
 
-def _fetch(url: str, dest: Path) -> None:
+def _fetch(url: str, dest: Path, timeout: int = 120) -> None:
+    req = urllib.request.Request(url, headers={"User-Agent": "clashpilot"})
+    with _opener().open(req, timeout=timeout) as r, open(dest, "wb") as out:
+        shutil.copyfileobj(r, out)
+
+
+def download_github(github_url: str, dest: Path, timeout: int = 120) -> None:
+    """Download a github.com URL, trying a mirror fallback when direct fails."""
+    last: Exception | None = None
+    for url in _download_candidates(github_url):
+        try:
+            _fetch(url, dest, timeout)
+            return
+        except Exception as e:  # noqa: BLE001
+            last = e
+            continue
+    raise CoreError(f"download failed ({github_url}): {last}")
+
+
+def _asset_digest(version: str, asset: str) -> str | None:
+    """SHA-256 hex for a release asset, read from the authoritative GitHub API.
+
+    Fetched directly from api.github.com over HTTPS (never via a download
+    mirror), so a compromised mirror cannot serve a tampered binary together
+    with a matching checksum. Returns None if the API is unreachable or doesn't
+    expose a digest for this asset.
+    """
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": "clashpilot"})
-        with _opener().open(req, timeout=120) as r, open(dest, "wb") as out:
-            shutil.copyfileobj(r, out)
-    except Exception as e:  # noqa: BLE001
-        raise CoreError(f"download failed ({url}): {e}") from e
+        req = urllib.request.Request(
+            f"https://api.github.com/repos/{GITHUB_REPO}/releases/tags/{version}",
+            headers={"Accept": "application/vnd.github+json", "User-Agent": "clashpilot"},
+        )
+        with _opener().open(req, timeout=15) as r:
+            data = json.loads(r.read().decode("utf-8"))
+    except Exception:  # noqa: BLE001
+        return None
+    for a in data.get("assets") or []:
+        if a.get("name") == asset:
+            digest = str(a.get("digest") or "")
+            if digest.startswith("sha256:"):
+                return digest.split(":", 1)[1].strip().lower()
+            return None
+    return None
+
+
+def _sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _require_checksum() -> bool:
+    return (os.getenv("CLASHPILOT_REQUIRE_CHECKSUM") or "").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+
+
+def _verify_archive(archive: Path, version: str, asset: str) -> None:
+    """Abort if the downloaded asset doesn't match its published SHA-256.
+
+    When no checksum can be obtained (e.g. api.github.com is blocked) we proceed
+    with a warning so blocked-region users aren't bricked -- unless the user opts
+    into strict mode with CLASHPILOT_REQUIRE_CHECKSUM=1.
+    """
+    expected = _asset_digest(version, asset)
+    if not expected:
+        if _require_checksum():
+            raise CoreError(
+                f"no checksum available for {asset} (GitHub API unreachable) and "
+                "CLASHPILOT_REQUIRE_CHECKSUM=1; refusing to run an unverified core"
+            )
+        print(
+            f"clashpilot: WARNING -- could not verify {asset} checksum "
+            "(GitHub API unreachable); proceeding without integrity check",
+            file=sys.stderr,
+        )
+        return
+    actual = _sha256_file(archive)
+    if actual != expected:
+        archive.unlink(missing_ok=True)
+        raise CoreError(
+            f"checksum mismatch for {asset}: expected {expected}, got {actual}. "
+            "Refusing to run a possibly tampered mihomo binary."
+        )
 
 
 def _extract(archive: Path, dest: Path) -> None:
@@ -172,8 +266,9 @@ def ensure_core(force: bool = False) -> Path:
     version = _latest_version()
     asset = _asset_name(version)
     archive = CORE_DIR / asset
-    _fetch(_download_url(version, asset), archive)
+    download_github(f"https://github.com/{GITHUB_REPO}/releases/download/{version}/{asset}", archive)
     try:
+        _verify_archive(archive, version, asset)
         _extract(archive, dest)
     finally:
         archive.unlink(missing_ok=True)
@@ -265,14 +360,16 @@ def start_core() -> int:
             CORE_LOG_FILE.replace(CORE_LOG_FILE.with_name(CORE_LOG_FILE.name + ".1"))
     except OSError:
         pass
-    logf = open(CORE_LOG_FILE, "ab")
     kwargs: dict = {**_NO_WINDOW}
     if sys.platform != "win32":
         kwargs["start_new_session"] = True
-    proc = subprocess.Popen(
-        [str(binary), "-d", str(MANAGED_DIR), "-f", str(CONFIG_FILE)],
-        stdout=logf, stderr=logf, **kwargs,
-    )
+    # The child inherits its own copy of the fd; close ours so the handle isn't
+    # leaked for the lifetime of this process.
+    with open(CORE_LOG_FILE, "ab") as logf:
+        proc = subprocess.Popen(
+            [str(binary), "-d", str(MANAGED_DIR), "-f", str(CONFIG_FILE)],
+            stdout=logf, stderr=logf, **kwargs,
+        )
     CORE_PID_FILE.write_text(str(proc.pid), encoding="utf-8")
     return proc.pid
 
