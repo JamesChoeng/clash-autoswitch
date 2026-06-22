@@ -45,7 +45,10 @@ ANTHROPIC_FAIL_THRESHOLD = env_int("CLASHPILOT_ANTHROPIC_FAIL_THRESHOLD", 2)
 # upstream/Anthropic-wide outage rather than a bad node. Past this, hold the
 # current node instead of benching + jumping through the whole pool. 0 disables.
 ANTHROPIC_OUTAGE_FAILOVERS = env_int("CLASHPILOT_ANTHROPIC_OUTAGE_FAILOVERS", 3)
-SWITCH_TOLERANCE_MS = env_int("CLASHPILOT_SWITCH_TOLERANCE_MS", 150)
+# When the current node is healthy, only switch if a candidate is this much faster
+# (latency reduction %) and stays ahead for SWITCH_SUSTAIN_SECONDS.
+SWITCH_IMPROVEMENT_PCT = env_int("CLASHPILOT_SWITCH_IMPROVEMENT_PCT", 30)
+SWITCH_SUSTAIN_SECONDS = env_int("CLASHPILOT_SWITCH_SUSTAIN_SECONDS", 180)
 MAX_WORKERS = env_int("CLASHPILOT_MAX_WORKERS", 10)
 SWITCH_COOLDOWN = env_int("CLASHPILOT_SWITCH_COOLDOWN", 60)
 MAX_DEFER = env_int("CLASHPILOT_MAX_DEFER", 5)

@@ -16,7 +16,8 @@ from .env_config import (
     SWITCH_CONFIRM_ATTEMPTS,
     SWITCH_CONFIRM_CANDIDATES,
     SWITCH_COOLDOWN,
-    SWITCH_TOLERANCE_MS,
+    SWITCH_IMPROVEMENT_PCT,
+    SWITCH_SUSTAIN_SECONDS,
     TARGETS,
 )
 from .health import is_alive
@@ -26,6 +27,27 @@ from .proxy_ctrl import delay, fetch_proxies, set_node, target_group
 
 _LAST_SWITCH_TS = 0.0
 _DEFER_COUNT = 0
+_FASTER_CANDIDATE: str | None = None
+_FASTER_SINCE = 0.0
+
+
+def significantly_faster(candidate_score: float, current_score: float) -> bool:
+    """True when candidate latency is at least SWITCH_IMPROVEMENT_PCT% lower."""
+    if current_score <= 0:
+        return False
+    return (current_score - candidate_score) / current_score >= SWITCH_IMPROVEMENT_PCT / 100
+
+
+def improvement_pct(candidate_score: float, current_score: float) -> int:
+    if current_score <= 0:
+        return 0
+    return int((current_score - candidate_score) / current_score * 100)
+
+
+def _reset_faster_tracking() -> None:
+    global _FASTER_CANDIDATE, _FASTER_SINCE
+    _FASTER_CANDIDATE = None
+    _FASTER_SINCE = 0.0
 
 
 def has_active_target_connection() -> bool:
@@ -72,6 +94,7 @@ def do_switch(group: str, node: str) -> bool:
     if set_node(group, node):
         _LAST_SWITCH_TS = time.time()
         _DEFER_COUNT = 0
+        _reset_faster_tracking()
         return True
     return False
 
@@ -110,7 +133,7 @@ def _switch_to_confirmed(group: str, ranking: list[tuple[str, float]]) -> tuple[
 
 
 def pick_and_switch(group: str | None = None, nodes: list[str] | None = None) -> dict:
-    global _DEFER_COUNT
+    global _DEFER_COUNT, _FASTER_CANDIDATE, _FASTER_SINCE
     proxies = fetch_proxies()
     group = group or target_group(proxies)
     nodes = nodes or eligible_nodes(proxies)
@@ -166,11 +189,34 @@ def pick_and_switch(group: str | None = None, nodes: list[str] | None = None) ->
             + (unconfirmed_note if unconfirmed else ""))
         return {"action": "switched", "from": cur, "to": node, "score": int(s), "group": group}
 
-    if best != cur and best_score < cur_score - SWITCH_TOLERANCE_MS:
+    if best != cur and significantly_faster(best_score, cur_score):
+        now = time.time()
+        if best != _FASTER_CANDIDATE:
+            _FASTER_CANDIDATE = best
+            _FASTER_SINCE = now
+        sustained = now - _FASTER_SINCE
+        pct = improvement_pct(best_score, cur_score)
+        if sustained < SWITCH_SUSTAIN_SECONDS:
+            log(
+                f"hold '{cur}'({int(cur_score)}): '{best}'({int(best_score)}) "
+                f"{pct}% faster, waiting {int(sustained)}/{SWITCH_SUSTAIN_SECONDS}s sustained"
+            )
+            return {
+                "action": "pending",
+                "node": cur,
+                "score": int(cur_score),
+                "best": best,
+                "best_score": int(best_score),
+                "improvement_pct": pct,
+                "sustained_s": int(sustained),
+                "required_s": SWITCH_SUSTAIN_SECONDS,
+                "group": group,
+            }
         since = time.time() - _LAST_SWITCH_TS
         if since < SWITCH_COOLDOWN:
             log(
-                f"hold '{cur}'({int(cur_score)}): better '{best}'({int(best_score)}) "
+                f"hold '{cur}'({int(cur_score)}): '{best}'({int(best_score)}) "
+                f"{pct}% faster for {int(sustained)}s "
                 f"but within {SWITCH_COOLDOWN}s cooldown ({int(since)}s elapsed)"
             )
             return {
@@ -200,7 +246,7 @@ def pick_and_switch(group: str | None = None, nodes: list[str] | None = None) ->
         if not confirm_stable(best):
             _DEFER_COUNT = 0
             log(
-                f"hold '{cur}'({int(cur_score)}): better '{best}'({int(best_score)}) "
+                f"hold '{cur}'({int(cur_score)}): '{best}'({int(best_score)}) "
                 f"failed stability re-check -- not switching"
             )
             return {
@@ -215,7 +261,8 @@ def pick_and_switch(group: str | None = None, nodes: list[str] | None = None) ->
         forced = _DEFER_COUNT >= MAX_DEFER
         do_switch(group, best)
         log(
-            f"switch '{cur}'({int(cur_score)}) -> '{best}'({int(best_score)})"
+            f"switch '{cur}'({int(cur_score)}) -> '{best}'({int(best_score)}) "
+            f"({pct}% faster, sustained {int(sustained)}s)"
             + (" (forced after max defers)" if forced else "")
         )
         return {
@@ -228,8 +275,12 @@ def pick_and_switch(group: str | None = None, nodes: list[str] | None = None) ->
             "group": group,
         }
 
+    _reset_faster_tracking()
     _DEFER_COUNT = 0
-    log(f"keep '{cur}' ({int(cur_score)}); best '{best}' ({int(best_score)}) within tolerance")
+    log(
+        f"keep '{cur}' ({int(cur_score)}); best '{best}' ({int(best_score)}) "
+        f"not {SWITCH_IMPROVEMENT_PCT}%+ faster for {SWITCH_SUSTAIN_SECONDS}s"
+    )
     return {
         "action": "kept",
         "node": cur,

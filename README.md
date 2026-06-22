@@ -172,6 +172,8 @@ TUN 模式下**不再设置系统代理**；`clashpilot down` 停止内核后路
 | `CLASHPILOT_DELAY_EXPECTED` | `200-428/430-501/505-599` | 通用测速视为「可用」的 HTTP 状态范围；默认排除 `429`/`502`/`503`/`504`，避免选中被限流或网关故障的中转节点 |
 | `CLASHPILOT_CLAUDE_EXPECTED` | `200-402/404-428/430-450/452-501/505-599` | Anthropic 探测可用状态范围；在通用基础上再排除地区封锁的 `403`/`451`，以便发现节点漂移到非受支持地区 |
 | `CLASHPILOT_NODE_BENCH_SECONDS` | `600` | 节点失败后将其及共用同一中转服务器的兄弟节点临时拉黑的秒数；`0` 关闭。避免反复选中正在限流的中转 |
+| `CLASHPILOT_SWITCH_IMPROVEMENT_PCT` | `30` | 当前节点正常时，候选节点延迟需比当前低至少该百分比才考虑切换 |
+| `CLASHPILOT_SWITCH_SUSTAIN_SECONDS` | `180` | 上述优势需连续保持的秒数（默认 3 分钟）后才执行切换 |
 | `CLASHPILOT_STATE_DIR` | 每用户状态目录 | 内核 / 配置 / 日志存放位置 |
 | `CLASH_CONTROLLER` / `CLASH_SECRET` | 自动 | 控制器地址 / 密钥 |
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 import unittest
 from unittest.mock import patch
 
@@ -73,6 +74,54 @@ class MacOSServiceTunTest(unittest.TestCase):
         with patch.object(config.sys, "platform", "darwin"):
             self.assertFalse(config.ensure_macos_service_tun())
         set_tun.assert_not_called()
+
+
+class SignificantlyFasterTest(unittest.TestCase):
+    def test_requires_thirty_percent_improvement(self) -> None:
+        self.assertFalse(selector.significantly_faster(75.0, 100.0))
+        self.assertTrue(selector.significantly_faster(69.0, 100.0))
+        self.assertTrue(selector.significantly_faster(70.0, 100.0))
+
+    def test_rejects_non_positive_current_score(self) -> None:
+        self.assertFalse(selector.significantly_faster(50.0, 0.0))
+
+
+class PickAndSwitchSustainTest(unittest.TestCase):
+    def setUp(self) -> None:
+        selector._reset_faster_tracking()
+        selector._LAST_SWITCH_TS = 0.0
+        selector._DEFER_COUNT = 0
+
+    @patch("clashpilot.selector.confirm_stable", return_value=True)
+    @patch("clashpilot.selector.has_active_target_connection", return_value=False)
+    @patch("clashpilot.selector.do_switch", return_value=True)
+    @patch("clashpilot.selector.rank_nodes", return_value=[("node-b", 60.0), ("node-a", 100.0)])
+    @patch("clashpilot.selector.drop_benched", side_effect=lambda nodes: nodes)
+    @patch("clashpilot.selector.eligible_nodes", return_value=["node-a", "node-b"])
+    @patch("clashpilot.selector.fetch_proxies", return_value={"AUTO": {"now": "node-a"}})
+    @patch("clashpilot.selector.target_group", return_value="AUTO")
+    def test_waits_for_sustain_before_switching(
+        self, *_mocks
+    ) -> None:
+        result = selector.pick_and_switch()
+        self.assertEqual(result["action"], "pending")
+        self.assertEqual(result["best"], "node-b")
+
+    @patch("clashpilot.selector.confirm_stable", return_value=True)
+    @patch("clashpilot.selector.has_active_target_connection", return_value=False)
+    @patch("clashpilot.selector.do_switch", return_value=True)
+    @patch("clashpilot.selector.rank_nodes", return_value=[("node-b", 60.0), ("node-a", 100.0)])
+    @patch("clashpilot.selector.drop_benched", side_effect=lambda nodes: nodes)
+    @patch("clashpilot.selector.eligible_nodes", return_value=["node-a", "node-b"])
+    @patch("clashpilot.selector.fetch_proxies", return_value={"AUTO": {"now": "node-a"}})
+    @patch("clashpilot.selector.target_group", return_value="AUTO")
+    def test_switches_after_sustain_elapsed(self, mock_switch, *_mocks) -> None:
+        selector._FASTER_CANDIDATE = "node-b"
+        selector._FASTER_SINCE = time.time() - selector.SWITCH_SUSTAIN_SECONDS - 1
+        result = selector.pick_and_switch()
+        self.assertEqual(result["action"], "switched")
+        self.assertEqual(result["to"], "node-b")
+        mock_switch.assert_called_once()
 
 
 class FormatScanTest(unittest.TestCase):
