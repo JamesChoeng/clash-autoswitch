@@ -49,6 +49,13 @@ SWITCH_TOLERANCE_MS = env_int("CLASHPILOT_SWITCH_TOLERANCE_MS", 150)
 MAX_WORKERS = env_int("CLASHPILOT_MAX_WORKERS", 10)
 SWITCH_COOLDOWN = env_int("CLASHPILOT_SWITCH_COOLDOWN", 60)
 MAX_DEFER = env_int("CLASHPILOT_MAX_DEFER", 5)
+# Re-probe a switch candidate this many extra times before committing the
+# switch, requiring every probe to pass, so autoswitch doesn't land on a node
+# that only works intermittently. 0 disables the re-check.
+SWITCH_CONFIRM_ATTEMPTS = env_int("CLASHPILOT_SWITCH_CONFIRM_ATTEMPTS", 2)
+# Cap how many top-ranked candidates get re-probed when the best one fails, so
+# a scan where everything is flaky can't blow up into a probe storm.
+SWITCH_CONFIRM_CANDIDATES = env_int("CLASHPILOT_SWITCH_CONFIRM_CANDIDATES", 5)
 LOG_MAX_BYTES = env_int("CLASHPILOT_LOG_MAX_BYTES", 1_000_000)
 SUB_REFRESH_INTERVAL = env_int("CLASHPILOT_SUB_REFRESH_INTERVAL", 21600)
 NODE_BENCH_SECONDS = env_int("CLASHPILOT_NODE_BENCH_SECONDS", 600)

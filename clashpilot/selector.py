@@ -13,6 +13,8 @@ from .env_config import (
     CLAUDE_TARGET,
     MAX_DEFER,
     MAX_WORKERS,
+    SWITCH_CONFIRM_ATTEMPTS,
+    SWITCH_CONFIRM_CANDIDATES,
     SWITCH_COOLDOWN,
     SWITCH_TOLERANCE_MS,
     TARGETS,
@@ -74,6 +76,39 @@ def do_switch(group: str, node: str) -> bool:
     return False
 
 
+def confirm_stable(node: str, attempts: int = SWITCH_CONFIRM_ATTEMPTS) -> bool:
+    """Re-probe a switch candidate `attempts` times and require *every* probe to
+    pass (Anthropic included). One reachable probe at scan time isn't enough --
+    this catches nodes that flap, so we don't switch onto something unstable."""
+    if attempts <= 0:
+        return True
+    for _ in range(attempts):
+        if score(node) is None:
+            return False
+    return True
+
+
+def confirmed_target(ranking: list[tuple[str, float]]) -> tuple[str, float] | None:
+    """First node (top-down) that survives `confirm_stable`. Only the top
+    SWITCH_CONFIRM_CANDIDATES are re-probed so a fully-flaky scan can't turn into
+    a probe storm. Returns None when none of them re-confirm."""
+    cap = SWITCH_CONFIRM_CANDIDATES if SWITCH_CONFIRM_CANDIDATES > 0 else len(ranking)
+    for node, s in ranking[:cap]:
+        if confirm_stable(node):
+            return node, s
+    return None
+
+
+def _switch_to_confirmed(group: str, ranking: list[tuple[str, float]]) -> tuple[str, float, bool]:
+    """Switch to the best re-confirmed node. Falls back to the top-ranked node
+    when none re-confirm (a forced switch still has to land somewhere).
+    Returns (node, score, unconfirmed)."""
+    confirmed = confirmed_target(ranking)
+    node, s = confirmed if confirmed else ranking[0]
+    do_switch(group, node)
+    return node, s, confirmed is None
+
+
 def pick_and_switch(group: str | None = None, nodes: list[str] | None = None) -> dict:
     global _DEFER_COUNT
     proxies = fetch_proxies()
@@ -99,32 +134,37 @@ def pick_and_switch(group: str | None = None, nodes: list[str] | None = None) ->
     log(scan_line)
     notify(scan_line)
 
+    unconfirmed_note = " (no candidate passed re-check; best effort)"
+
     if cur is None:
-        do_switch(group, best)
-        log(f"no current node -> switch to '{best}' ({int(best_score)})")
-        return {"action": "switched", "from": None, "to": best, "score": int(best_score), "group": group}
+        node, s, unconfirmed = _switch_to_confirmed(group, ranking)
+        log(f"no current node -> switch to '{node}' ({int(s)})" + (unconfirmed_note if unconfirmed else ""))
+        return {"action": "switched", "from": None, "to": node, "score": int(s), "group": group}
 
     if cur_score is None:
         if config.opus_whitelist() is not None and cur not in nodes:
-            do_switch(group, best)
-            log(f"enforce Opus whitelist: '{cur}' is not an eligible node -> switch to '{best}' ({int(best_score)})")
+            node, s, unconfirmed = _switch_to_confirmed(group, ranking)
+            log(f"enforce Opus whitelist: '{cur}' is not an eligible node -> switch to '{node}' ({int(s)})"
+                + (unconfirmed_note if unconfirmed else ""))
             return {
-                "action": "switched", "from": cur, "to": best,
-                "score": int(best_score), "group": group,
+                "action": "switched", "from": cur, "to": node,
+                "score": int(s), "group": group,
                 "reason": "whitelist enforcement",
             }
         if is_benched(cur):
-            do_switch(group, best)
-            log(f"current '{cur}' is benched -> switch to '{best}' ({int(best_score)})")
-            return {"action": "switched", "from": cur, "to": best, "score": int(best_score),
+            node, s, unconfirmed = _switch_to_confirmed(group, ranking)
+            log(f"current '{cur}' is benched -> switch to '{node}' ({int(s)})"
+                + (unconfirmed_note if unconfirmed else ""))
+            return {"action": "switched", "from": cur, "to": node, "score": int(s),
                     "group": group, "reason": "benched"}
         if is_alive(cur):
             log(f"keep '{cur}' (didn't rank this scan but still alive)")
             return {"action": "kept", "node": cur, "best": best, "group": group}
         bench_nodes(cur, "confirmed dead at scan")
-        do_switch(group, best)
-        log(f"current '{cur}' confirmed dead -> switch to '{best}' ({int(best_score)})")
-        return {"action": "switched", "from": cur, "to": best, "score": int(best_score), "group": group}
+        node, s, unconfirmed = _switch_to_confirmed(group, ranking)
+        log(f"current '{cur}' confirmed dead -> switch to '{node}' ({int(s)})"
+            + (unconfirmed_note if unconfirmed else ""))
+        return {"action": "switched", "from": cur, "to": node, "score": int(s), "group": group}
 
     if best != cur and best_score < cur_score - SWITCH_TOLERANCE_MS:
         since = time.time() - _LAST_SWITCH_TS
@@ -156,6 +196,21 @@ def pick_and_switch(group: str | None = None, nodes: list[str] | None = None) ->
                 "defer_count": _DEFER_COUNT,
                 "reason": "active connection",
                 "group": group,
+            }
+        if not confirm_stable(best):
+            _DEFER_COUNT = 0
+            log(
+                f"hold '{cur}'({int(cur_score)}): better '{best}'({int(best_score)}) "
+                f"failed stability re-check -- not switching"
+            )
+            return {
+                "action": "kept",
+                "node": cur,
+                "score": int(cur_score),
+                "best": best,
+                "best_score": int(best_score),
+                "group": group,
+                "reason": "candidate unstable",
             }
         forced = _DEFER_COUNT >= MAX_DEFER
         do_switch(group, best)
