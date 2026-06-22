@@ -24,6 +24,8 @@ import sys
 import urllib.request
 from pathlib import Path
 
+from .subscription_merge import merge_subscription_texts
+
 # LAN / link-local ranges kept off the TUN route table so local services stay reachable.
 _TUN_ROUTE_EXCLUDE = (
     "127.0.0.0/8",
@@ -101,25 +103,97 @@ def save_settings(data: dict) -> None:
     SETTINGS_FILE.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
+def _parse_url_list(raw: str) -> list[str]:
+    parts = re.split(r"[\n,]+", raw)
+    return [p.strip() for p in parts if p.strip()]
+
+
+def subscription_urls() -> list[str]:
+    """User-configured subscription URLs (env or saved settings), or empty."""
+    env_multi = os.getenv("CLASHPILOT_SUBSCRIPTIONS")
+    if env_multi:
+        return _parse_url_list(env_multi)
+    env_single = os.getenv("CLASHPILOT_SUBSCRIPTION")
+    if env_single:
+        urls = _parse_url_list(env_single)
+        return urls if len(urls) > 1 else [env_single.strip()]
+    s = get_settings()
+    urls = s.get("subscription_urls")
+    if isinstance(urls, list):
+        out = [u.strip() for u in urls if isinstance(u, str) and u.strip()]
+        if out:
+            return out
+    legacy = s.get("subscription_url")
+    if isinstance(legacy, str) and legacy.strip():
+        return [legacy.strip()]
+    return []
+
+
 def subscription_url() -> str | None:
-    """The user-configured subscription (env or saved settings), or None."""
-    return os.getenv("CLASHPILOT_SUBSCRIPTION") or get_settings().get("subscription_url")
+    """Primary subscription URL for display/backward compatibility."""
+    urls = subscription_urls()
+    return urls[0] if urls else None
+
+
+def effective_subscription_urls() -> list[str]:
+    """URLs we fetch: the user's list if set, else the built-in default."""
+    urls = subscription_urls()
+    return urls if urls else [DEFAULT_SUBSCRIPTION_URL]
 
 
 def effective_subscription_url() -> str:
-    """URL we actually fetch: the user's if set, else the built-in default."""
-    return subscription_url() or DEFAULT_SUBSCRIPTION_URL
+    """Single URL for backward compatibility (first configured source)."""
+    return effective_subscription_urls()[0]
 
 
 def using_default_subscription() -> bool:
     """True when no user subscription is set and we fall back to the default."""
-    return not subscription_url()
+    return not subscription_urls()
+
+
+def set_subscription_urls(urls: list[str]) -> None:
+    cleaned = []
+    seen: set[str] = set()
+    for url in urls:
+        u = url.strip()
+        if u and u not in seen:
+            cleaned.append(u)
+            seen.add(u)
+    s = get_settings()
+    s["subscription_urls"] = cleaned
+    if cleaned:
+        s["subscription_url"] = cleaned[0]
+    else:
+        s.pop("subscription_url", None)
+        s.pop("subscription_urls", None)
+    save_settings(s)
 
 
 def set_subscription_url(url: str) -> None:
-    s = get_settings()
-    s["subscription_url"] = url
-    save_settings(s)
+    """Replace the subscription list with a single URL."""
+    set_subscription_urls([url])
+
+
+def add_subscription_url(url: str) -> bool:
+    """Append a subscription URL. Returns False if it was already present."""
+    u = url.strip()
+    if not u:
+        raise ConfigError("subscription URL must not be empty")
+    urls = subscription_urls()
+    if u in urls:
+        return False
+    set_subscription_urls(urls + [u])
+    return True
+
+
+def remove_subscription_url(url: str) -> bool:
+    """Remove a subscription URL. Returns False if it was not found."""
+    u = url.strip()
+    urls = subscription_urls()
+    if u not in urls:
+        return False
+    set_subscription_urls([x for x in urls if x != u])
+    return True
 
 
 def _whitelist_env() -> str:
@@ -332,22 +406,8 @@ def _opener() -> urllib.request.OpenerDirector:
     return urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
-def fetch_subscription(url: str | None = None) -> str:
-    """Download the subscription body (decoding base64 panels) and cache it.
-
-    Falls back to the built-in default subscription when the user hasn't set one,
-    so a fresh install can connect without a `set-sub` step.
-    """
-    url = url or effective_subscription_url()
-    req = urllib.request.Request(url, headers={"User-Agent": "clash-verge/v2.0.0"})
-    try:
-        with _opener().open(req, timeout=30) as r:
-            raw = r.read()
-    except Exception as e:  # noqa: BLE001
-        raise ConfigError(f"failed to fetch subscription: {e}") from e
+def _decode_subscription_body(raw: bytes) -> str:
     text = raw.decode("utf-8", "replace")
-    # Clash subs are YAML containing `proxies:`/`proxy-providers:`; if neither is
-    # present the body may be base64-encoded -- try to decode it.
     if "proxies:" not in text and "proxy-providers:" not in text:
         stripped = text.strip()
         try:
@@ -356,6 +416,49 @@ def fetch_subscription(url: str | None = None) -> str:
                 text = decoded
         except Exception:  # noqa: BLE001
             pass
+    return text
+
+
+def fetch_subscription_url(url: str) -> str:
+    """Download one subscription body (decoding base64 panels when needed)."""
+    req = urllib.request.Request(url, headers={"User-Agent": "clash-verge/v2.0.0"})
+    try:
+        with _opener().open(req, timeout=30) as r:
+            raw = r.read()
+    except Exception as e:  # noqa: BLE001
+        raise ConfigError(f"failed to fetch subscription {url!r}: {e}") from e
+    return _decode_subscription_body(raw)
+
+
+def fetch_subscription(url: str | None = None) -> str:
+    """Download subscription content and cache the merged result.
+
+    When multiple URLs are configured, each source is fetched and merged so
+    autoswitch can pick the fastest node across all of them. Partial failures
+    are tolerated when at least one source succeeds.
+    """
+    if url is not None:
+        text = fetch_subscription_url(url)
+        MANAGED_DIR.mkdir(parents=True, exist_ok=True)
+        SUBSCRIPTION_FILE.write_text(text, encoding="utf-8")
+        return text
+
+    urls = effective_subscription_urls()
+    if len(urls) == 1:
+        text = fetch_subscription_url(urls[0])
+    else:
+        bodies: list[str] = []
+        errors: list[str] = []
+        for sub_url in urls:
+            try:
+                bodies.append(fetch_subscription_url(sub_url))
+            except ConfigError as e:
+                errors.append(str(e))
+        if not bodies:
+            detail = "; ".join(errors) if errors else "no subscription URLs configured"
+            raise ConfigError(f"failed to fetch any subscription: {detail}")
+        text = merge_subscription_texts(bodies)
+
     MANAGED_DIR.mkdir(parents=True, exist_ok=True)
     SUBSCRIPTION_FILE.write_text(text, encoding="utf-8")
     return text

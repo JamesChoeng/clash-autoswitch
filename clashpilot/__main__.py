@@ -182,7 +182,13 @@ def _cmd_status(_args: argparse.Namespace) -> int:
     if config.using_default_subscription():
         out(f"  subscription: (default) {config.DEFAULT_SUBSCRIPTION_URL}")
     else:
-        out(f"  subscription: {config.subscription_url()}")
+        urls = config.subscription_urls()
+        if len(urls) == 1:
+            out(f"  subscription: {urls[0]}")
+        else:
+            out(f"  subscriptions: {len(urls)} sources (merged for autoswitch)")
+            for i, url in enumerate(urls, 1):
+                out(f"    [{i}] {url}")
     mode = config.proxy_mode()
     out(f"  routing:      {mode}" + (f" (stack={config.tun_stack()})" if mode == "tun" else ""))
     out(f"  proxy:        127.0.0.1:{config.mixed_port()}")
@@ -251,8 +257,52 @@ def _cmd_uninstall_service(_args: argparse.Namespace) -> int:
 
 
 def _cmd_set_sub(args: argparse.Namespace) -> int:
+    if getattr(args, "add", False):
+        added = config.add_subscription_url(args.url)
+        if added:
+            print(f"added subscription ({len(config.subscription_urls())} total) -> {config.SETTINGS_FILE}")
+        else:
+            print("subscription already present; list with: clashpilot list-sub")
+        return 0
     config.set_subscription_url(args.url)
     print(f"saved subscription URL -> {config.SETTINGS_FILE}")
+    return 0
+
+
+def _cmd_list_sub(_args: argparse.Namespace) -> int:
+    if config.using_default_subscription():
+        print(f"(default) {config.DEFAULT_SUBSCRIPTION_URL}")
+        return 0
+    urls = config.subscription_urls()
+    print(f"{len(urls)} subscription source(s):")
+    for i, url in enumerate(urls, 1):
+        print(f"  [{i}] {url}")
+    return 0
+
+
+def _cmd_remove_sub(args: argparse.Namespace) -> int:
+    if config.using_default_subscription():
+        print("no user subscriptions configured", file=sys.stderr)
+        return 1
+    urls = config.subscription_urls()
+    target = args.url
+    if getattr(args, "index", None) is not None:
+        idx = args.index
+        if idx < 1 or idx > len(urls):
+            print(f"invalid index {idx}; use 1..{len(urls)}", file=sys.stderr)
+            return 1
+        target = urls[idx - 1]
+    if not target:
+        print("provide a URL or --index N", file=sys.stderr)
+        return 1
+    if not config.remove_subscription_url(target):
+        print(f"subscription not found: {target!r}", file=sys.stderr)
+        return 1
+    remaining = config.subscription_urls()
+    if remaining:
+        print(f"removed; {len(remaining)} subscription(s) remain -> {config.SETTINGS_FILE}")
+    else:
+        print(f"removed; no subscriptions left (will use built-in default) -> {config.SETTINGS_FILE}")
     return 0
 
 
@@ -272,7 +322,11 @@ def _cmd_setup_path(_args: argparse.Namespace) -> int:
 def _cmd_update(_args: argparse.Namespace) -> int:
     api.reconfigure()
     path = config.update_subscription()
-    print(f"subscription refreshed; managed config rebuilt at {path}")
+    urls = config.subscription_urls()
+    if len(urls) > 1:
+        print(f"merged {len(urls)} subscription sources; managed config rebuilt at {path}")
+    else:
+        print(f"subscription refreshed; managed config rebuilt at {path}")
     if config.opus_whitelist() is not None and core.core_running():
         ok = daemon.refresh_opus_whitelist()
         print(f"opus whitelist rescanned: {len(ok)} nodes")
@@ -375,7 +429,24 @@ def _build_parser() -> argparse.ArgumentParser:
 
     sp = sub.add_parser("set-sub", help="Save your Clash/Mihomo subscription URL.")
     sp.add_argument("url")
+    sp.add_argument(
+        "--add",
+        action="store_true",
+        help="append this URL to existing subscriptions instead of replacing",
+    )
     sp.set_defaults(func=_cmd_set_sub)
+
+    sub.add_parser("list-sub", help="List configured subscription URLs.").set_defaults(func=_cmd_list_sub)
+
+    rm = sub.add_parser("remove-sub", help="Remove a subscription URL from the list.")
+    rm.add_argument("url", nargs="?", help="subscription URL to remove")
+    rm.add_argument(
+        "--index",
+        type=int,
+        metavar="N",
+        help="remove the Nth subscription (see list-sub)",
+    )
+    rm.set_defaults(func=_cmd_remove_sub)
 
     sub.add_parser("update", help="Re-fetch the subscription and rebuild the config.").set_defaults(func=_cmd_update)
 

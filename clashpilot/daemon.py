@@ -71,7 +71,7 @@ def format_status() -> str:
     core_line = (
         f"core_running={core.core_running()}\n"
         f"core_version={core.core_version() or 'n/a'}\n"
-        f"subscription={'(default)' if config.using_default_subscription() else '(set)'}\n"
+        f"subscription={'(default)' if config.using_default_subscription() else f'({len(config.subscription_urls())} source(s))' if len(config.subscription_urls()) > 1 else '(set)'}\n"
         f"proxy_mode={config.proxy_mode()}\n"
         f"mixed_port={config.mixed_port()}\n"
     )
