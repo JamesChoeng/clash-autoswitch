@@ -19,7 +19,7 @@ from . import api, config, core, sysproxy
 from .api import ControllerError, ControllerUnreachable, get_json, request
 from .config import STATE_DIR
 from .bench import bench_nodes
-from .env_config import ANTHROPIC_FAIL_THRESHOLD, FULL_SCAN_INTERVAL, HEALTH_FAIL_THRESHOLD, HEALTH_INTERVAL, SUB_REFRESH_INTERVAL, TARGETS
+from .env_config import ANTHROPIC_FAIL_THRESHOLD, ANTHROPIC_OUTAGE_FAILOVERS, FULL_SCAN_INTERVAL, HEALTH_FAIL_THRESHOLD, HEALTH_INTERVAL, SUB_REFRESH_INTERVAL, TARGETS
 from .health import health_fail_threshold, node_latency
 from .logutil import LOG_FILE, log, notify, set_console_notify, tail_log
 from .opus import maybe_refresh_opus_whitelist, refresh_opus_whitelist
@@ -306,6 +306,7 @@ def _run_loop(manage_subscription: bool = False) -> None:
     log(f"== clashpilot start | targets={TARGETS}")
     fails = 0
     fail_threshold = HEALTH_FAIL_THRESHOLD
+    failovers = 0
     last_full = time.time()
     last_sub = time.time()
 
@@ -366,21 +367,40 @@ def _run_loop(manage_subscription: bool = False) -> None:
                     fails = 0
                     fail_threshold = needed
                 fails += 1
-                reason = "Anthropic unreachable" if needed == ANTHROPIC_FAIL_THRESHOLD else "unhealthy"
+                anthropic_issue = needed == ANTHROPIC_FAIL_THRESHOLD
+                reason = "Anthropic unreachable" if anthropic_issue else "unhealthy"
                 log(f"health: current '{cur}' {reason} ({fails}/{fail_threshold})")
                 if fails >= fail_threshold:
-                    log(f"current node confirmed DOWN ({reason}) -> failover")
-                    if cur:
-                        bench_nodes(cur, f"failed health loop ({reason})")
-                    pick_and_switch(group)
-                    fails = 0
-                    fail_threshold = HEALTH_FAIL_THRESHOLD
-                    last_full = time.time()
+                    # Repeated Anthropic failovers with no healthy round in between
+                    # means the problem is upstream, not the node -- switching just
+                    # burns the pool, so hold the current node until it recovers.
+                    if (
+                        anthropic_issue
+                        and ANTHROPIC_OUTAGE_FAILOVERS > 0
+                        and failovers >= ANTHROPIC_OUTAGE_FAILOVERS
+                    ):
+                        log(
+                            f"suspected Anthropic-wide outage ({failovers} consecutive "
+                            f"failovers) -> holding '{cur}', not switching"
+                        )
+                        fails = 0
+                        fail_threshold = HEALTH_FAIL_THRESHOLD
+                    else:
+                        log(f"current node confirmed DOWN ({reason}) -> failover")
+                        if cur:
+                            bench_nodes(cur, f"failed health loop ({reason})")
+                        result = pick_and_switch(group)
+                        if result.get("action") == "switched":
+                            failovers += 1
+                        fails = 0
+                        fail_threshold = HEALTH_FAIL_THRESHOLD
+                        last_full = time.time()
             else:
-                if fails:
+                if fails or failovers:
                     log(f"current '{cur}' recovered, reset fail counter")
                     fails = 0
                     fail_threshold = HEALTH_FAIL_THRESHOLD
+                    failovers = 0
                 if time.time() - last_full >= FULL_SCAN_INTERVAL:
                     maybe_refresh_opus_whitelist(force=True)
                     pick_and_switch(group)
