@@ -1,7 +1,7 @@
 r"""HTTP client for Mihomo's external-controller API.
 
 Uses TCP to the managed config's `external-controller` endpoint. On Windows,
-falls back to the legacy named pipe when TCP is unavailable.
+optionally falls back to a legacy named pipe when `CLASHPILOT_WIN_PIPE=1`.
 """
 
 from __future__ import annotations
@@ -14,7 +14,8 @@ import sys
 import time
 from pathlib import Path
 
-WIN_PIPE = r"\\.\pipe\verge-mihomo"
+WIN_PIPE = os.getenv("CLASHPILOT_WIN_PIPE_PATH") or r"\\.\pipe\verge-mihomo"
+_WIN_PIPE_ENABLED = os.getenv("CLASHPILOT_WIN_PIPE", "").strip().lower() in ("1", "true", "on", "yes")
 
 
 class ControllerError(RuntimeError):
@@ -129,7 +130,7 @@ def request(method: str, path: str, body: str | None = None, retries: int = 5) -
             transports.append(("tcp", host, int(port)))
         except ValueError:
             pass
-    if sys.platform == "win32":
+    if sys.platform == "win32" and _WIN_PIPE_ENABLED:
         transports.append(("pipe", None, None))
 
     last_err: Exception | None = None

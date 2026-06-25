@@ -163,8 +163,10 @@ def _startup_vbs_path() -> Path:
 
 
 def _startup_vbs() -> str:
+    tun_prefix = 'WshShell.Environment("PROCESS")("CLASHPILOT_TUN") = "1"\n' if config.tun_enabled() else ""
     return (
         'Set WshShell = CreateObject("WScript.Shell")\n'
+        f"{tun_prefix}"
         f'WshShell.Run """{PYTHON}"" -m clashpilot up", 0, False\n'
     )
 
@@ -179,8 +181,9 @@ def _install_windows_startup_vbs(reason: str | None = None) -> str:
 
 
 def _install_windows() -> str:
-    # /SC ONLOGON for the current user; pythonw keeps it windowless.
     tr = f'"{PYTHON}" -m clashpilot up'
+    if config.tun_enabled():
+        tr = f'cmd /c "set CLASHPILOT_TUN=1&& {tr}"'
     code, out = _run([
         "schtasks", "/Create", "/TN", TASK_NAME, "/SC", "ONLOGON",
         "/TR", tr, "/RL", "LIMITED", "/F",
@@ -219,7 +222,9 @@ def _service_routing_preamble(args) -> str | None:
     if getattr(args, "no_tun", False):
         config.set_tun_enabled(False)
         return "routing: system proxy (saved to settings)"
-    if sys.platform == "darwin" and config.ensure_macos_service_tun():
+    if config.ensure_service_tun():
+        if sys.platform == "win32":
+            return "routing: enabled TUN for Cursor compatibility on Windows (saved to settings)"
         return "routing: enabled TUN for Cursor compatibility on macOS (saved to settings)"
     return None
 

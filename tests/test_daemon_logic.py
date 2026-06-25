@@ -59,10 +59,11 @@ class DaemonReexportsTest(unittest.TestCase):
 
 
 class MacOSServiceTunTest(unittest.TestCase):
+    @patch.object(config, "ensure_service_tun", return_value=True)
     @patch.object(config, "set_tun_enabled")
     @patch.object(config, "get_settings", return_value={})
     @patch.object(config, "_env_bool", return_value=None)
-    def test_enables_tun_on_first_macos_install(self, _env, _settings, set_tun) -> None:
+    def test_enables_tun_on_first_service_install(self, _env, _settings, set_tun, _ensure) -> None:
         with patch.object(config.sys, "platform", "darwin"):
             self.assertTrue(config.ensure_macos_service_tun())
         set_tun.assert_called_once_with(True)
@@ -75,6 +76,14 @@ class MacOSServiceTunTest(unittest.TestCase):
             self.assertFalse(config.ensure_macos_service_tun())
         set_tun.assert_not_called()
 
+    @patch.object(config, "set_tun_enabled")
+    @patch.object(config, "get_settings", return_value={})
+    @patch.object(config, "_env_bool", return_value=None)
+    def test_windows_service_tun_on_first_install(self, _env, _settings, set_tun) -> None:
+        with patch.object(config.sys, "platform", "win32"):
+            self.assertTrue(config.ensure_windows_service_tun())
+        set_tun.assert_called_once_with(True)
+
 
 class SignificantlyFasterTest(unittest.TestCase):
     def test_requires_thirty_percent_improvement(self) -> None:
@@ -84,6 +93,26 @@ class SignificantlyFasterTest(unittest.TestCase):
 
     def test_rejects_non_positive_current_score(self) -> None:
         self.assertFalse(selector.significantly_faster(50.0, 0.0))
+
+
+class PickAndSwitchDeferTest(unittest.TestCase):
+    def setUp(self) -> None:
+        selector._reset_faster_tracking()
+        selector._LAST_SWITCH_TS = 0.0
+        selector._DEFER_COUNT = 0
+
+    @patch("clashpilot.switch_policy.should_defer_switch", return_value=True)
+    @patch("clashpilot.selector._switch_to_confirmed")
+    @patch("clashpilot.selector.rank_nodes", return_value=[("node-b", 60.0)])
+    @patch("clashpilot.selector.drop_benched", side_effect=lambda nodes: nodes)
+    @patch("clashpilot.selector.eligible_nodes", return_value=["node-b"])
+    @patch("clashpilot.selector.fetch_proxies", return_value={"AUTO": {"now": "node-a"}})
+    @patch("clashpilot.selector.target_group", return_value="AUTO")
+    @patch.object(config, "opus_whitelist", return_value=["node-b"])
+    def test_defers_whitelist_enforcement_with_active_connection(self, *_mocks) -> None:
+        result = selector.pick_and_switch()
+        self.assertEqual(result["action"], "deferred")
+        self.assertEqual(result["reason"], "whitelist enforcement")
 
 
 class PickAndSwitchSustainTest(unittest.TestCase):

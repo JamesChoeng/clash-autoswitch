@@ -134,6 +134,8 @@ def _cmd_up(args: argparse.Namespace) -> int:
         print(f"  proxy:      127.0.0.1:{config.mixed_port()} (http+socks)")
         if sys.platform == "darwin":
             print("  tip:        Cursor may ignore system proxy; try: clp up --tun --persist-tun")
+        elif sys.platform == "win32":
+            print("  tip:        node switches drop proxied sessions; try: clp up --tun --persist-tun")
     if config.opus_filtering_enabled():
         wl = config.opus_whitelist() or []
         print(f"  opus filter: on ({len(wl)} nodes cached; auto-scan on first run if empty)")
@@ -218,6 +220,21 @@ def _cmd_status(_args: argparse.Namespace) -> int:
             out(f"  opus wl:      {len(wl)} nodes (Opus-region pool)")
         else:
             out("  opus wl:      active, not scanned yet")
+        last = config.last_switch()
+        if last:
+            import datetime
+
+            ts = last.get("ts")
+            when = (
+                datetime.datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
+                if isinstance(ts, (int, float))
+                else "n/a"
+            )
+            forced = " (forced)" if last.get("forced") else ""
+            out(
+                f"  last switch:  {last.get('from') or 'n/a'} -> {last.get('to') or 'n/a'} "
+                f"[{last.get('reason') or 'unknown'}]{forced} @ {when}"
+            )
     except daemon.ControllerUnreachable as e:
         out(f"  node:         n/a (controller unreachable: {e})")
     except daemon.ControllerError as e:
@@ -328,8 +345,8 @@ def _cmd_update(_args: argparse.Namespace) -> int:
     else:
         print(f"subscription refreshed; managed config rebuilt at {path}")
     if config.opus_whitelist() is not None and core.core_running():
-        ok = daemon.refresh_opus_whitelist()
-        print(f"opus whitelist rescanned: {len(ok)} nodes")
+        ok = daemon.refresh_opus_whitelist(incremental=True)
+        print(f"opus whitelist updated (incremental): {len(ok)} nodes")
     if core.core_running():
         print("note: restart the core to apply (clashpilot down && clashpilot up)")
     return 0
@@ -341,10 +358,10 @@ def _cmd_whitelist(args: argparse.Namespace) -> int:
         if not core.core_running():
             print("error: core is not running -- start clashpilot first (clashpilot up)", file=sys.stderr)
             return 1
-        ok = daemon.refresh_opus_whitelist()
+        ok = daemon.refresh_opus_whitelist(full=True)
         meta = config.opus_whitelist_meta()
         print(f"opus whitelist: {len(ok)} nodes saved -> {config.SETTINGS_FILE}")
-        print("  (exit country must be Anthropic-supported + Anthropic API reachable)")
+        print("  (full geo scan: exit country must be Anthropic-supported + Anthropic API reachable)")
         for name in ok:
             cc = meta.get(name, "?")
             print(_console_safe(f"  + {name} [{cc}]"))

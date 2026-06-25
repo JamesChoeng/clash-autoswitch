@@ -338,6 +338,53 @@ def ensure_macos_service_tun() -> bool:
     return True
 
 
+def ensure_windows_service_tun() -> bool:
+    """Enable TUN on first Windows `install-service` unless routing was already configured."""
+    if sys.platform != "win32":
+        return False
+    if _env_bool("CLASHPILOT_TUN") is not None:
+        return False
+    s = get_settings()
+    if "tun_enabled" in s:
+        return False
+    set_tun_enabled(True)
+    return True
+
+
+def ensure_service_tun() -> bool:
+    """Platform hook for first-time service install TUN defaults."""
+    if sys.platform == "darwin":
+        return ensure_macos_service_tun()
+    if sys.platform == "win32":
+        return ensure_windows_service_tun()
+    return False
+
+
+def save_last_switch(
+    from_node: str | None,
+    to_node: str,
+    reason: str,
+    *,
+    forced: bool = False,
+) -> None:
+    import time
+
+    s = get_settings()
+    s["last_switch"] = {
+        "from": from_node,
+        "to": to_node,
+        "reason": reason,
+        "forced": forced,
+        "ts": time.time(),
+    }
+    save_settings(s)
+
+
+def last_switch() -> dict | None:
+    raw = get_settings().get("last_switch")
+    return raw if isinstance(raw, dict) else None
+
+
 def tun_stack() -> str:
     """mihomo TUN stack: system / gvisor / mixed (platform-aware default)."""
     raw = (os.getenv("CLASHPILOT_TUN_STACK") or get_settings().get("tun_stack") or "").strip().lower()

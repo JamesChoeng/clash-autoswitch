@@ -7,6 +7,7 @@ import urllib.parse
 
 from .api import ControllerError, ControllerUnreachable, get_json, request
 from .env_config import (
+    ACTIVE_HOSTS,
     CLAUDE_EXPECTED,
     CLAUDE_TARGET,
     DELAY_EXPECTED,
@@ -98,6 +99,34 @@ def set_node(group: str, node: str) -> bool:
     except ControllerError:
         return False
     return status in (204, 200)
+
+
+def _connection_targets(conn: dict) -> str:
+    meta = conn.get("metadata") or {}
+    parts = [
+        meta.get("host") or "",
+        meta.get("sniffHost") or "",
+        meta.get("destinationIP") or "",
+        meta.get("destinationPort") or "",
+        conn.get("rule") or "",
+    ]
+    chains = conn.get("chains") or []
+    if isinstance(chains, list):
+        parts.extend(str(c) for c in chains)
+    return " ".join(str(p) for p in parts if p).lower()
+
+
+def has_active_target_connection() -> bool:
+    """True when mihomo has in-flight traffic to Cursor or Anthropic endpoints."""
+    try:
+        conns = get_json("/connections").get("connections") or []
+    except ControllerError:
+        return False
+    for c in conns:
+        blob = _connection_targets(c)
+        if any(k in blob for k in ACTIVE_HOSTS):
+            return True
+    return False
 
 
 def delay(

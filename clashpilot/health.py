@@ -12,9 +12,34 @@ from .env_config import (
     HEALTH_FAIL_THRESHOLD,
     HEALTH_RETRIES,
     HEALTH_TIMEOUT_MS,
+    HEALTH_WINDOW_FAILS,
+    HEALTH_WINDOW_SIZE,
     TARGETS,
 )
 from .proxy_ctrl import delay
+
+_HEALTH_WINDOW: list[bool] = []
+
+
+def reset_health_window() -> None:
+    global _HEALTH_WINDOW
+    _HEALTH_WINDOW = []
+
+
+def health_window_snapshot() -> tuple[int, int, int]:
+    """Return (rounds_recorded, failures, window_fail_threshold)."""
+    failures = sum(1 for ok in _HEALTH_WINDOW if not ok)
+    return len(_HEALTH_WINDOW), failures, HEALTH_WINDOW_FAILS
+
+
+def health_window_update(healthy_round: bool) -> bool:
+    """Record one health round; True when the sliding window says failover."""
+    global _HEALTH_WINDOW
+    _HEALTH_WINDOW.append(healthy_round)
+    if len(_HEALTH_WINDOW) > HEALTH_WINDOW_SIZE:
+        _HEALTH_WINDOW.pop(0)
+    failures = sum(1 for ok in _HEALTH_WINDOW if not ok)
+    return failures >= HEALTH_WINDOW_FAILS
 
 
 def anthropic_reachable(node: str, timeout_ms: int = HEALTH_TIMEOUT_MS) -> bool:

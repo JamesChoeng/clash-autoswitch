@@ -86,7 +86,7 @@ Have clashpilot start at login and stay running in the background (restarts on c
 clashpilot install-service
 ```
 
-On **macOS**, the first `install-service` automatically enables TUN mode (better Cursor compatibility) unless you already saved a routing preference. Override explicitly:
+On **macOS** and **Windows**, the first `install-service` automatically enables TUN mode (better Cursor compatibility) unless you already saved a routing preference. Override explicitly:
 
 ```bash
 clashpilot install-service --tun

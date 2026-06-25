@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "clashpilot"
-version = "0.2.0"
+version = "0.3.0"
 description = "The best proxy tool for AI agents: auto-picks the fastest node and fails over when it dies."
 readme = "README.md"
 requires-python = ">=3.8"

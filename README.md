@@ -87,7 +87,7 @@ clashpilot up                    # autoswitch 只在白名单内选节点
 clashpilot install-service
 ```
 
-macOS 上**首次** `install-service` 会自动启用 TUN 模式（Cursor 兼容性更好）；已配置过路由偏好的不会覆盖。也可显式指定：
+macOS / Windows 上**首次** `install-service` 会自动启用 TUN 模式（Cursor 兼容性更好）；已配置过路由偏好的不会覆盖。也可显式指定：
 
 ```bash
 clashpilot install-service --tun      # 强制 TUN
@@ -146,7 +146,7 @@ TUN 模式下**不再设置系统代理**；`clashpilot down` 停止内核后路
 | `clashpilot set-sub URL` | 保存订阅链接 |
 | `clashpilot update` | 重新拉取订阅并重建配置 |
 | `clashpilot whitelist` | 查看 Opus 地区节点白名单 |
-| `clashpilot whitelist --refresh` | 扫描出口 IP 地区，保留 Anthropic 支持地区内的节点 |
+| `clashpilot whitelist --refresh` | 全量 geo 扫描（会临时切换节点测出口 IP）；日常 autoswitch 使用无切换的 light scan |
 | `clashpilot install-service` | 注册开机自启的后台服务（崩溃自动重启） |
 | `clashpilot uninstall-service` | 移除开机自启的后台服务 |
 | `clashpilot setup-path` | 将命令所在目录加入 PATH |
@@ -174,6 +174,14 @@ TUN 模式下**不再设置系统代理**；`clashpilot down` 停止内核后路
 | `CLASHPILOT_NODE_BENCH_SECONDS` | `600` | 节点失败后将其及共用同一中转服务器的兄弟节点临时拉黑的秒数；`0` 关闭。避免反复选中正在限流的中转 |
 | `CLASHPILOT_SWITCH_IMPROVEMENT_PCT` | `30` | 当前节点正常时，候选节点延迟需比当前低至少该百分比才考虑切换 |
 | `CLASHPILOT_SWITCH_SUSTAIN_SECONDS` | `180` | 上述优势需连续保持的秒数（默认 3 分钟）后才执行切换 |
+| `CLASHPILOT_FULL_SCAN_INTERVAL` | `600` | 健康时定期扫描间隔（秒）；配合 `CLASHPILOT_IDLE_SCAN=1` 时节点正常则跳过全量 rank |
+| `CLASHPILOT_IDLE_SCAN` | `1` | 设为 `0` 强制每次周期都做全量 rank |
+| `CLASHPILOT_HEALTH_WINDOW_SIZE` | `5` | 健康检查滑动窗口长度（最近 N 轮） |
+| `CLASHPILOT_HEALTH_WINDOW_FAILS` | `3` | 窗口内至少 M 轮失败才触发 failover |
+| `CLASHPILOT_MAX_HEALTH_DEFER` | `5` | 有 Cursor/Anthropic 活跃连接时，failover 最多 defer 次数，超限强制切换 |
+| `CLASHPILOT_SCORE_EMA_ALPHA` | `30` | 节点延迟分数 EMA 平滑系数（百分比）；`0` 关闭 |
+| `CLASHPILOT_OPUS_RESCAN_COOLDOWN` | `600` | 白名单 stale 时两次自动重扫的最小间隔（秒） |
+| `CLASHPILOT_WIN_PIPE` | `0` | Windows：设为 `1` 才启用 Clash Verge 遗留 pipe fallback |
 | `CLASHPILOT_STATE_DIR` | 每用户状态目录 | 内核 / 配置 / 日志存放位置 |
 | `CLASH_CONTROLLER` / `CLASH_SECRET` | 自动 | 控制器地址 / 密钥 |
 
