@@ -8,21 +8,19 @@ from clashpilot import health
 from clashpilot.switch_policy import SwitchContext, decide
 
 
-class HealthWindowTest(unittest.TestCase):
+class HealthFailoverTest(unittest.TestCase):
     def setUp(self) -> None:
-        health.reset_health_window()
+        health.reset_health_failures()
 
-    def test_requires_enough_failures_in_window(self) -> None:
-        for _ in range(2):
-            self.assertFalse(health.health_window_update(False))
-        self.assertTrue(health.health_window_update(False))
+    def test_failover_after_threshold_confirmed_fails(self) -> None:
+        threshold = 2
+        self.assertFalse(health.health_failover_update(True, threshold))
+        self.assertTrue(health.health_failover_update(True, threshold))
 
-    def test_success_resets_failure_pressure(self) -> None:
-        health.health_window_update(False)
-        health.health_window_update(False)
-        self.assertFalse(health.health_window_update(True))
-        _, fails, _ = health.health_window_snapshot()
-        self.assertEqual(fails, 2)
+    def test_success_resets_consecutive_fails(self) -> None:
+        health.health_failover_update(True, 2)
+        self.assertFalse(health.health_failover_update(False, 2))
+        self.assertEqual(health.health_fail_snapshot(), 0)
 
 
 class SwitchPolicyTest(unittest.TestCase):

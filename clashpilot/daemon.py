@@ -29,7 +29,13 @@ from .env_config import (
     SUB_REFRESH_INTERVAL,
     TARGETS,
 )
-from .health import health_fail_threshold, health_window_snapshot, health_window_update, node_latency, reset_health_window
+from .health import (
+    health_fail_snapshot,
+    health_fail_threshold,
+    health_failover_update,
+    node_latency,
+    reset_health_failures,
+)
 from .logutil import LOG_FILE, log, notify, set_console_notify, tail_log
 from .opus import maybe_refresh_opus_whitelist, refresh_opus_whitelist
 from .proxy_ctrl import current_node, current_node_chain, fetch_proxies, has_active_target_connection, target_group
@@ -363,24 +369,23 @@ def _run_loop(manage_subscription: bool = False) -> None:
                 cur = current_node(group)
             except ControllerUnreachable:
                 if _recover_core(group):
-                    reset_health_window()
+                    reset_health_failures()
                     health_defer_count = 0
                     continue
                 log("health: controller unreachable -- skipping round (not counted)")
                 continue
 
-            unhealthy, needed = health_fail_threshold(cur)
-            healthy_round = not unhealthy
-            window_fail = health_window_update(healthy_round)
-            rounds, window_fails, window_need = health_window_snapshot()
+            unhealthy, fail_threshold = health_fail_threshold(cur)
+            should_failover = health_failover_update(unhealthy, fail_threshold)
+            consecutive_fails = health_fail_snapshot()
             if unhealthy:
-                anthropic_issue = needed == ANTHROPIC_FAIL_THRESHOLD
+                anthropic_issue = fail_threshold == ANTHROPIC_FAIL_THRESHOLD
                 reason = "Anthropic unreachable" if anthropic_issue else "unhealthy"
                 log(
                     f"health: current '{cur}' {reason} "
-                    f"(window {window_fails}/{window_need}, round {rounds})"
+                    f"(confirmed-fail {consecutive_fails}/{fail_threshold})"
                 )
-                if window_fail:
+                if should_failover:
                     if (
                         anthropic_issue
                         and ANTHROPIC_OUTAGE_FAILOVERS > 0
@@ -390,7 +395,7 @@ def _run_loop(manage_subscription: bool = False) -> None:
                             f"suspected Anthropic-wide outage ({failovers} consecutive "
                             f"failovers) -> holding '{cur}', not switching"
                         )
-                        reset_health_window()
+                        reset_health_failures()
                         health_defer_count = 0
                     else:
                         force_failover = False
@@ -415,12 +420,12 @@ def _run_loop(manage_subscription: bool = False) -> None:
                             result = pick_and_switch(group)
                             if result.get("action") == "switched":
                                 failovers += 1
-                            reset_health_window()
+                            reset_health_failures()
                             last_full = time.time()
             else:
-                if window_fails or failovers or health_defer_count:
-                    log(f"current '{cur}' recovered, reset health window")
-                    reset_health_window()
+                if failovers or health_defer_count:
+                    log(f"current '{cur}' recovered, reset health counters")
+                    reset_health_failures()
                     health_defer_count = 0
                     failovers = 0
                 if time.time() - last_full >= FULL_SCAN_INTERVAL:

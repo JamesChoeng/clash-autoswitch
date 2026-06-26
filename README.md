@@ -165,7 +165,8 @@ TUN 模式下**不再设置系统代理**；`clashpilot down` 停止内核后路
 | `CLASHPILOT_CONTROLLER_PORT` | `9090` | 内核控制端口 |
 | `CLASHPILOT_TARGETS` | Cursor + Anthropic | 测速目标地址（逗号分隔） |
 | `CLASHPILOT_OPUS_WHITELIST` | 默认开启 | 设为 `0` 关闭 Opus 地区过滤；`1` 强制开启（兼容 `CLASHPILOT_CLAUDE_WHITELIST`） |
-| `CLASHPILOT_ANTHROPIC_FAIL_THRESHOLD` | `1` | Anthropic 探针连续失败多少次后切换节点（其他目标失败仍为 3 次） |
+| `CLASHPILOT_ANTHROPIC_FAIL_THRESHOLD` | `1` | Anthropic 探针连续失败多少次后切换节点（每轮已含多次重试） |
+| `CLASHPILOT_HEALTH_FAIL_THRESHOLD` | `1` | 当前节点确认失败（Cursor/Anthropic 探针全失败）连续多少轮后 failover；与「切更快节点」的 sustain/cooldown 逻辑无关 |
 | `CLASHPILOT_OPUS_REGIONS` | Anthropic 官方列表 | 覆盖 Opus 允许的 ISO 国家码，逗号分隔，如 `US,GB,JP,SG,TW` |
 | `CLASHPILOT_GEO_IP_URL` | ipapi.co | 探测节点出口 IP 的 GeoIP 接口 |
 | `CLASHPILOT_CLAUDE_TARGET` | Anthropic API | Anthropic 连通性探测地址 |
@@ -176,8 +177,6 @@ TUN 模式下**不再设置系统代理**；`clashpilot down` 停止内核后路
 | `CLASHPILOT_SWITCH_SUSTAIN_SECONDS` | `180` | 上述优势需连续保持的秒数（默认 3 分钟）后才执行切换 |
 | `CLASHPILOT_FULL_SCAN_INTERVAL` | `600` | 健康时定期扫描间隔（秒）；配合 `CLASHPILOT_IDLE_SCAN=1` 时节点正常则跳过全量 rank |
 | `CLASHPILOT_IDLE_SCAN` | `1` | 设为 `0` 强制每次周期都做全量 rank |
-| `CLASHPILOT_HEALTH_WINDOW_SIZE` | `5` | 健康检查滑动窗口长度（最近 N 轮） |
-| `CLASHPILOT_HEALTH_WINDOW_FAILS` | `3` | 窗口内至少 M 轮失败才触发 failover |
 | `CLASHPILOT_MAX_HEALTH_DEFER` | `5` | 有 Cursor/Anthropic 活跃连接时，failover 最多 defer 次数，超限强制切换 |
 | `CLASHPILOT_SCORE_EMA_ALPHA` | `30` | 节点延迟分数 EMA 平滑系数（百分比）；`0` 关闭 |
 | `CLASHPILOT_OPUS_RESCAN_COOLDOWN` | `600` | 白名单 stale 时两次自动重扫的最小间隔（秒） |

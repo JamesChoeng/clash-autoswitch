@@ -48,8 +48,9 @@ CLAUDE_EXPECTED = env_str("CLASHPILOT_CLAUDE_EXPECTED", "200-402/404-428/430-450
 FULL_SCAN_INTERVAL = env_int("CLASHPILOT_FULL_SCAN_INTERVAL", _default_full_scan_interval())
 HEALTH_INTERVAL = env_int("CLASHPILOT_HEALTH_INTERVAL", 15)
 HEALTH_RETRIES = env_int("CLASHPILOT_HEALTH_RETRIES", 3)
-HEALTH_FAIL_THRESHOLD = env_int("CLASHPILOT_HEALTH_FAIL_THRESHOLD", 3)
-ANTHROPIC_FAIL_THRESHOLD = env_int("CLASHPILOT_ANTHROPIC_FAIL_THRESHOLD", 2)
+# Confirmed-fail health rounds before failover (each round already retries probes).
+HEALTH_FAIL_THRESHOLD = env_int("CLASHPILOT_HEALTH_FAIL_THRESHOLD", 1)
+ANTHROPIC_FAIL_THRESHOLD = env_int("CLASHPILOT_ANTHROPIC_FAIL_THRESHOLD", 1)
 # Consecutive Anthropic failovers (no healthy round in between) that signal an
 # upstream/Anthropic-wide outage rather than a bad node. Past this, hold the
 # current node instead of benching + jumping through the whole pool. 0 disables.
@@ -63,7 +64,7 @@ SWITCH_COOLDOWN = env_int("CLASHPILOT_SWITCH_COOLDOWN", 60)
 MAX_DEFER = env_int("CLASHPILOT_MAX_DEFER", 5)
 # Health failover defers while Cursor/Anthropic is active; force after this many defers.
 MAX_HEALTH_DEFER = env_int("CLASHPILOT_MAX_HEALTH_DEFER", 5)
-# Sliding window: failover when this many of the last HEALTH_WINDOW_SIZE rounds fail.
+# Legacy sliding-window knobs (unused; failover uses consecutive confirmed-fail rounds).
 HEALTH_WINDOW_SIZE = env_int("CLASHPILOT_HEALTH_WINDOW_SIZE", 5)
 HEALTH_WINDOW_FAILS = env_int("CLASHPILOT_HEALTH_WINDOW_FAILS", 3)
 # EMA smoothing factor for rank scores (0 disables smoothing).

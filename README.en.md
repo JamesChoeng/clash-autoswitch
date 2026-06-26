@@ -161,7 +161,8 @@ Everything has sensible defaults; override via environment variables:
 | `CLASHPILOT_CONTROLLER_PORT` | `9090` | core controller port |
 | `CLASHPILOT_TARGETS` | Cursor + Anthropic | probe target URLs (comma-separated) |
 | `CLASHPILOT_OPUS_WHITELIST` | on by default | set `0` to disable Opus-region filtering |
-| `CLASHPILOT_ANTHROPIC_FAIL_THRESHOLD` | `1` | consecutive Anthropic probe failures before failover |
+| `CLASHPILOT_ANTHROPIC_FAIL_THRESHOLD` | `1` | consecutive Anthropic probe failures before failover (each round retries probes) |
+| `CLASHPILOT_HEALTH_FAIL_THRESHOLD` | `1` | consecutive confirmed-fail health rounds before failover; separate from faster-node optimization |
 | `CLASHPILOT_STATE_DIR` | per-user state dir | where core / config / logs live |
 | `CLASH_CONTROLLER` / `CLASH_SECRET` | auto | controller address / secret |
 
