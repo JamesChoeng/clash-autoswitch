@@ -81,8 +81,28 @@ class MacOSServiceTunTest(unittest.TestCase):
     @patch.object(config, "_env_bool", return_value=None)
     def test_windows_service_tun_on_first_install(self, _env, _settings, set_tun) -> None:
         with patch.object(config.sys, "platform", "win32"):
-            self.assertTrue(config.ensure_windows_service_tun())
+            self.assertTrue(config.ensure_windows_tun())
         set_tun.assert_called_once_with(True)
+
+
+class WindowsTunDefaultTest(unittest.TestCase):
+    @patch.object(config, "get_settings", return_value={})
+    @patch.object(config, "_env_bool", return_value=None)
+    def test_windows_defaults_to_tun_without_saved_preference(self, _env, _settings) -> None:
+        with patch.object(config.sys, "platform", "win32"):
+            self.assertTrue(config.tun_enabled())
+
+    @patch.object(config, "get_settings", return_value={"tun_enabled": False})
+    @patch.object(config, "_env_bool", return_value=None)
+    def test_windows_respects_explicit_system_proxy(self, _env, _settings) -> None:
+        with patch.object(config.sys, "platform", "win32"):
+            self.assertFalse(config.tun_enabled())
+
+    @patch.object(config, "get_settings", return_value={})
+    @patch.object(config, "_env_bool", return_value=None)
+    def test_linux_defaults_to_system_proxy(self, _env, _settings) -> None:
+        with patch.object(config.sys, "platform", "linux"):
+            self.assertFalse(config.tun_enabled())
 
 
 class SignificantlyFasterTest(unittest.TestCase):

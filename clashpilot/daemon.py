@@ -42,6 +42,8 @@ from .proxy_ctrl import current_node, current_node_chain, fetch_proxies, has_act
 from .selector import format_scan, pick_and_switch, switch_to
 
 PID_FILE = STATE_DIR / "clashpilot.pid"
+_TUN_FAIL_MARKER = "Start TUN listening error"
+_system_proxy_active = False
 
 
 def _python_exe() -> Path:
@@ -235,6 +237,64 @@ def _wait_controller(timeout: int = 20) -> bool:
     return False
 
 
+def _wait_mixed_port(timeout: float = 20) -> bool:
+    """Wait until mihomo's mixed port accepts TCP (avoids Cursor hitting a dead proxy)."""
+    import socket
+
+    host, port = "127.0.0.1", config.mixed_port()
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            with socket.create_connection((host, port), timeout=0.5):
+                return True
+        except OSError:
+            time.sleep(0.25)
+    return False
+
+
+def _core_log_tail(max_bytes: int = 16384) -> str:
+    try:
+        data = core.CORE_LOG_FILE.read_bytes()
+    except OSError:
+        return ""
+    return data[-max_bytes:].decode("utf-8", errors="replace")
+
+
+def tun_listening_ok() -> bool | None:
+    """True when the latest core session started TUN cleanly; False on logged TUN errors."""
+    if not config.tun_enabled():
+        return None
+    tail = _core_log_tail()
+    if not tail:
+        return None
+    marker = "Start initial configuration in progress"
+    idx = tail.rfind(marker)
+    session = tail[idx:] if idx >= 0 else tail
+    if _TUN_FAIL_MARKER in session:
+        return False
+    if "[TUN]" in session:
+        return True
+    return None
+
+
+def _apply_system_proxy() -> bool:
+    global _system_proxy_active
+    host, port = "127.0.0.1", config.mixed_port()
+    if sysproxy.set_system_proxy(host, port):
+        _system_proxy_active = True
+        log(f"== system proxy set -> {host}:{port}")
+        return True
+    log("!! could not set system proxy automatically (set it manually)")
+    return False
+
+
+def _clear_system_proxy() -> None:
+    global _system_proxy_active
+    if _system_proxy_active and sysproxy.unset_system_proxy():
+        log("== system proxy removed")
+    _system_proxy_active = False
+
+
 def _recover_core(group: str | None = None) -> bool:
     if core.core_running():
         return False
@@ -297,10 +357,20 @@ def bring_up() -> bool:
             log(f"== TUN mode enabled (stack={config.tun_stack()}) -- skipping system proxy")
             if sys.platform == "darwin":
                 log("   macOS: TUN may require admin; grant network permission if prompted")
-        elif sysproxy.set_system_proxy("127.0.0.1", config.mixed_port()):
-            log(f"== system proxy set -> 127.0.0.1:{config.mixed_port()}")
+            elif sys.platform == "win32":
+                log("   Windows: TUN needs admin; approve UAC if prompted")
+            time.sleep(0.5)
+            tun_ok = tun_listening_ok()
+            if tun_ok is False:
+                reason = "access denied (run clashpilot as admin)" if sys.platform == "win32" else "see core log"
+                log(f"!! TUN failed to start ({reason}) -- falling back to system proxy")
+                if not _wait_mixed_port():
+                    log("!! mixed port not ready -- system proxy may fail for early clients")
+                _apply_system_proxy()
         else:
-            log("!! could not set system proxy automatically (set it manually)")
+            if not _wait_mixed_port():
+                log("!! mixed port not ready -- system proxy may fail for early clients")
+            _apply_system_proxy()
         _run_loop(manage_subscription=True)
         return True
     finally:
@@ -309,9 +379,7 @@ def bring_up() -> bool:
 
 
 def bring_down() -> None:
-    if not config.tun_enabled():
-        if sysproxy.unset_system_proxy():
-            log("== system proxy removed")
+    _clear_system_proxy()
     if core.stop_core():
         log("== core stopped")
 

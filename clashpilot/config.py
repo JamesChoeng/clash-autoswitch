@@ -316,7 +316,11 @@ def tun_enabled() -> bool:
     env = _env_bool("CLASHPILOT_TUN")
     if env is not None:
         return env
-    return bool(get_settings().get("tun_enabled"))
+    s = get_settings()
+    if "tun_enabled" in s:
+        return bool(s["tun_enabled"])
+    # Windows: Cursor often misses system/http proxy on startup; TUN is the reliable default.
+    return sys.platform == "win32"
 
 
 def set_tun_enabled(enabled: bool) -> None:
@@ -338,8 +342,8 @@ def ensure_macos_service_tun() -> bool:
     return True
 
 
-def ensure_windows_service_tun() -> bool:
-    """Enable TUN on first Windows `install-service` unless routing was already configured."""
+def ensure_windows_tun() -> bool:
+    """Persist TUN as the Windows default on first bring-up / service install."""
     if sys.platform != "win32":
         return False
     if _env_bool("CLASHPILOT_TUN") is not None:
@@ -349,6 +353,11 @@ def ensure_windows_service_tun() -> bool:
         return False
     set_tun_enabled(True)
     return True
+
+
+def ensure_windows_service_tun() -> bool:
+    """Enable TUN on first Windows `install-service` unless routing was already configured."""
+    return ensure_windows_tun()
 
 
 def ensure_service_tun() -> bool:

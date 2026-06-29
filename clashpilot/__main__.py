@@ -80,14 +80,34 @@ def _console_notify(line: str) -> None:
     print(_console_safe(line), flush=True)
 
 
+def _maybe_elevate_for_tun(args: argparse.Namespace) -> int | None:
+    """On Windows + TUN, re-launch with UAC if needed. Returns exit code or None."""
+    if sys.platform != "win32" or getattr(args, "no_elevate", False):
+        return None
+    if not config.tun_enabled():
+        return None
+    from . import win_elevate
+
+    if win_elevate.is_admin():
+        return None
+    print("clashpilot: TUN on Windows needs Administrator — requesting UAC elevation...")
+    return win_elevate.relaunch_elevated(extra_args=["--no-elevate"])
+
+
 def _cmd_up(args: argparse.Namespace) -> int:
     """Foreground: core + routing + autoswitch loop. Blocks until Ctrl-C."""
     if getattr(args, "tun", False):
         os.environ["CLASHPILOT_TUN"] = "1"
     elif getattr(args, "no_tun", False):
         os.environ["CLASHPILOT_TUN"] = "0"
+    elif config.ensure_windows_tun():
+        _log("enabled TUN by default on Windows")
     if getattr(args, "persist_tun", False):
         config.set_tun_enabled(config.tun_enabled())
+
+    elevated = _maybe_elevate_for_tun(args)
+    if elevated is not None:
+        return elevated
 
     running = daemon.daemon_pid()
     if running:
@@ -101,6 +121,9 @@ def _cmd_up(args: argparse.Namespace) -> int:
             cmd.append("--tun")
         elif getattr(args, "no_tun", False):
             cmd.append("--no-tun")
+        if getattr(args, "persist_tun", False):
+            cmd.append("--persist-tun")
+        cmd.append("--no-elevate")
         env = os.environ.copy()
         subprocess.Popen(
             cmd,
@@ -130,12 +153,14 @@ def _cmd_up(args: argparse.Namespace) -> int:
         print(f"  routing:    TUN (stack={config.tun_stack()})")
         if sys.platform == "darwin":
             print("  note:       macOS TUN may require admin / network permission")
+        elif sys.platform == "win32":
+            print("  note:       Windows TUN may require admin (approve UAC if prompted)")
     else:
         print(f"  proxy:      127.0.0.1:{config.mixed_port()} (http+socks)")
         if sys.platform == "darwin":
             print("  tip:        Cursor may ignore system proxy; try: clp up --tun --persist-tun")
         elif sys.platform == "win32":
-            print("  tip:        node switches drop proxied sessions; try: clp up --tun --persist-tun")
+            print("  tip:        system proxy mode; prefer default TUN or: clp up --no-tun --persist-tun")
     if config.opus_filtering_enabled():
         wl = config.opus_whitelist() or []
         print(f"  opus filter: on ({len(wl)} nodes cached; auto-scan on first run if empty)")
@@ -156,7 +181,8 @@ def _cmd_up(args: argparse.Namespace) -> int:
 def _cmd_down(_args: argparse.Namespace) -> int:
     dmsg = daemon.stop_daemon()  # stop foreground/background loop if any
     stopped = core.stop_core()   # ensure the core is down (idempotent)
-    if config.tun_enabled():
+    tun_ok = daemon.tun_listening_ok()
+    if config.tun_enabled() and tun_ok is not False:
         routing_msg = "TUN stopped"
     else:
         unset = sysproxy.unset_system_proxy()
@@ -192,7 +218,15 @@ def _cmd_status(_args: argparse.Namespace) -> int:
             for i, url in enumerate(urls, 1):
                 out(f"    [{i}] {url}")
     mode = config.proxy_mode()
-    out(f"  routing:      {mode}" + (f" (stack={config.tun_stack()})" if mode == "tun" else ""))
+    if mode == "tun":
+        tun_ok = daemon.tun_listening_ok()
+        if tun_ok is False:
+            out(f"  routing:      tun (FAILED, stack={config.tun_stack()})")
+            out("  tun note:     not listening -- run as admin on Windows, or: clp up --no-tun --persist-tun")
+        else:
+            out(f"  routing:      tun (stack={config.tun_stack()})")
+    else:
+        out(f"  routing:      {mode}")
     out(f"  proxy:        127.0.0.1:{config.mixed_port()}")
     out(f"  controller:   127.0.0.1:{config.controller_port()}")
     try:
@@ -415,6 +449,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "--persist-tun",
         action="store_true",
         help="save the TUN on/off choice from this run to settings",
+    )
+    up.add_argument(
+        "--no-elevate",
+        action="store_true",
+        help="do not request UAC elevation on Windows (TUN may fail)",
     )
     up.add_argument(
         "-d", "--detach",

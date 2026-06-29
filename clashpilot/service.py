@@ -167,7 +167,7 @@ def _startup_vbs() -> str:
     return (
         'Set WshShell = CreateObject("WScript.Shell")\n'
         f"{tun_prefix}"
-        f'WshShell.Run """{PYTHON}"" -m clashpilot up", 0, False\n'
+        f'WshShell.Run """{PYTHON}"" -m clashpilot up --no-elevate", 0, False\n'
     )
 
 
@@ -181,12 +181,13 @@ def _install_windows_startup_vbs(reason: str | None = None) -> str:
 
 
 def _install_windows() -> str:
-    tr = f'"{PYTHON}" -m clashpilot up'
+    tr = f'"{PYTHON}" -m clashpilot up --no-elevate'
     if config.tun_enabled():
         tr = f'cmd /c "set CLASHPILOT_TUN=1&& {tr}"'
+    run_level = "HIGHEST" if config.tun_enabled() else "LIMITED"
     code, out = _run([
         "schtasks", "/Create", "/TN", TASK_NAME, "/SC", "ONLOGON",
-        "/TR", tr, "/RL", "LIMITED", "/F",
+        "/TR", tr, "/RL", run_level, "/F",
     ])
     if code != 0:
         return _install_windows_startup_vbs(out.rstrip())
