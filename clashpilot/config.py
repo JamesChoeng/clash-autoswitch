@@ -396,7 +396,14 @@ def tun_stack() -> str:
 
 def tun_mtu() -> int | None:
     """Optional TUN MTU override (macOS often benefits from 9000)."""
-    raw = (os.getenv("CLASHPILOT_TUN_MTU") or get_settings().get("tun_mtu") or "").strip()
+    env = os.getenv("CLASHPILOT_TUN_MTU")
+    saved = get_settings().get("tun_mtu")
+    raw = env if env not in (None, "") else saved
+    if raw in (None, ""):
+        return 9000 if sys.platform == "darwin" else None
+    if isinstance(raw, int):
+        return raw
+    raw = str(raw).strip()
     if not raw:
         return 9000 if sys.platform == "darwin" else None
     try:
